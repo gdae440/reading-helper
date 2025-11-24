@@ -11,7 +11,6 @@ from datetime import datetime
 from PIL import Image
 import genanki
 import socket
-from gtts import gTTS
 
 # ================= 1. 环境与配置 =================
 
@@ -19,11 +18,11 @@ for key in ["all_proxy", "http_proxy", "https_proxy"]:
     if key in os.environ: del os.environ[key]
 os.environ["no_proxy"] = "localhost,127.0.0.1,::1"
 
-st.set_page_config(page_title="跟读助手 Pro (V10.10 安全版)", layout="wide", page_icon="🦋")
+st.set_page_config(page_title="跟读助手 Pro (V11.0 修复版)", layout="wide", page_icon="🦋")
 
 VOCAB_FILE = "my_vocab.json"
-# 云端不再读取或写入 config.json，防止隐私泄露
-# CONFIG_FILE = "config.json" 
+# 移除本地 config 读写，确保云端安全
+# CONFIG_FILE = "config.json"
 
 def get_local_ip():
     try:
@@ -42,21 +41,17 @@ def load_config():
         "api_key": "",
         "sf_tts_model_id": "FunAudioLLM/CosyVoice2-0.5B" 
     }
-    # 仅从 Secrets 读取 (如果后台配了的话)，不再读取本地文件
+    # 仅从 Secrets 读取
     try:
         if "SILICON_KEY" in st.secrets: config["api_key"] = st.secrets["SILICON_KEY"]
     except: pass
     return config
-
-# 🔥 核心修改：删除了 save_config 函数
-# 这样在云端运行时，Key 永远不会被写入硬盘，别人刷新页面就是空的
 
 if 'app_config' not in st.session_state:
     st.session_state.app_config = load_config()
 
 # ================= 2. 核心数据 =================
 
-# 1. Edge 本地音色
 VOICE_MAP_EDGE = {
     "🇬🇧 英语": [("en-GB-RyanNeural", "Ryan (英/男)"), ("en-US-ChristopherNeural", "Chris (美/男)"), ("en-US-AriaNeural", "Aria (美/女)")],
     "🇫🇷 法语": [("fr-FR-HenriNeural", "Henri (法/男)"), ("fr-FR-DeniseNeural", "Denise (法/女)")],
@@ -64,19 +59,14 @@ VOICE_MAP_EDGE = {
     "🇷🇺 俄语": [("ru-RU-DmitryNeural", "Dmitry (俄/男)"), ("ru-RU-SvetlanaNeural", "Svetlana (俄/女)")],
 }
 
-# 2. SiliconFlow CosyVoice2
 VOICE_MAP_SF = {
     "男声 - Benjamin (英伦风)": "FunAudioLLM/CosyVoice2-0.5B:benjamin", 
     "男声 - Alex (沉稳)": "FunAudioLLM/CosyVoice2-0.5B:alex",
     "男声 - Bob (欢快)": "FunAudioLLM/CosyVoice2-0.5B:bob",
-    "男声 - Charles (磁性)": "FunAudioLLM/CosyVoice2-0.5B:charles",
-    "男声 - David (标准)": "FunAudioLLM/CosyVoice2-0.5B:david",
     "女声 - Anna (新闻)": "FunAudioLLM/CosyVoice2-0.5B:anna",
     "女声 - Bella (温柔)": "FunAudioLLM/CosyVoice2-0.5B:bella",
     "女声 - Claire (清晰)": "FunAudioLLM/CosyVoice2-0.5B:claire"
 }
-
-GTTS_LANG_MAP = {"🇬🇧 英语": "en", "🇫🇷 法语": "fr", "🇩🇪 德语": "de", "🇷🇺 俄语": "ru"}
 
 def load_vocab():
     if os.path.exists(VOCAB_FILE):
@@ -92,11 +82,16 @@ def compress_image(image):
     image.thumbnail((1024, 1024)); buffered = io.BytesIO(); image.save(buffered, format="JPEG", quality=85)
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-# ================= 3. 音频处理核心 =================
+# ================= 3. 音频处理核心 (修复语速) =================
 
-async def get_audio_bytes_mixed(text, engine_type, voice_id, rate_str, lang_choice, app_config):
-    # 1. Edge
-    if engine_type == "Edge (本地推荐)":
+async def get_audio_bytes_mixed(text, engine_type, voice_id, speed_int, app_config):
+    """
+    speed_int: -50 到 50 的整数
+    """
+    
+    # 1. Edge TTS (使用百分比语速)
+    if "Edge" in engine_type:
+        rate_str = f"{speed_int:+d}%" # 例如 "+10%"
         try:
             communicate = edge_tts.Communicate(text, voice_id, rate=rate_str)
             mp3_fp = io.BytesIO()
@@ -105,57 +100,126 @@ async def get_audio_bytes_mixed(text, engine_type, voice_id, rate_str, lang_choi
             return mp3_fp.getvalue(), None
         except Exception as e: return None, f"Edge ({voice_id}) 失败: {e}"
 
-    # 2. SiliconFlow (付费/CosyVoice)
-    elif engine_type == "SiliconFlow (云端/付费)":
+    # 2. SiliconFlow (使用浮点数语速)
+    elif "SiliconFlow" in engine_type:
         api_key = app_config["api_key"]
         if not api_key: return None, "请先输入 API Key"
         client = OpenAI(api_key=api_key, base_url="https://api.siliconflow.cn/v1")
         
+        # 解析模型
         model_id = "FunAudioLLM/CosyVoice2-0.5B"
         if ":" in voice_id: model_id = voice_id.split(":")[0]
+
+        # 🔥 修复语速: 将 -50~50 映射为 0.5~1.5
+        # 0 -> 1.0 (原速)
+        # 50 -> 1.5 (1.5倍速)
+        # -50 -> 0.5 (0.5倍速)
+        speed_float = 1.0 + (speed_int / 100.0)
 
         try:
             response = client.audio.speech.create(
                 model=model_id,
-                voice=voice_id, # 传完整ID
+                voice=voice_id,
                 input=text,
-                speed=1.0 
+                speed=speed_float # 传入计算后的浮点数
             )
             return response.content, None
         except Exception as e: 
             return None, f"SF TTS 失败: {e}"
 
-    # 3. Google
-    elif engine_type == "Google (云端保底)":
-        try:
-            g_lang = GTTS_LANG_MAP.get(lang_choice, "en")
-            tts = gTTS(text=text, lang=g_lang)
-            mp3_fp = io.BytesIO()
-            tts.write_to_fp(mp3_fp)
-            return mp3_fp.getvalue(), None
-        except Exception as e: return None, f"Google 失败: {e}"
-
     return None, "未知引擎"
 
-async def create_anki_package(selected_items):
-    deck_id = random.randrange(1 << 30, 1 << 31)
-    deck = genanki.Deck(deck_id, '跟读助手')
-    my_model = genanki.Model(random.randrange(1<<30, 1<<31), 'Model', fields=[{'name':'Q'},{'name':'A'},{'name':'Audio'}], templates=[{'name':'C1','qfmt':'{{Q}}<br>{{Audio}}','afmt':'{{FrontSide}}<hr>{{A}}'}])
-    media_files = []; progress = st.progress(0)
-    for idx, item in enumerate(selected_items):
-        try:
-            fname = f"audio_{idx}_{random.randint(100,999)}.mp3"
-            tts = gTTS(text=item['word'], lang='en'); tts.save(fname) 
-            media_files.append(fname)
-            deck.add_note(genanki.Note(model=my_model, fields=[item['word'], item.get('zh',''), f"[sound:{fname}]"]))
-        except: pass
-        progress.progress((idx+1)/len(selected_items))
-    pkg = genanki.Package(deck); pkg.media_files = media_files
-    out = io.BytesIO(); pkg.write_to_file(out)
-    for f in media_files: os.remove(f)
-    progress.empty(); return out.getvalue()
+# ================= 4. Anki 导出 (修复内容缺失 & 引擎同步) =================
 
-# ================= 4. API 查词与翻译 =================
+async def create_anki_package(selected_items, engine_type, voice_id, speed_int, app_config):
+    """
+    完全修复的 Anki 打包函数
+    1. 传入当前引擎设置，确保生成的音频和听的一样。
+    2. 修复字段映射，包含 IPA 和 俄语。
+    """
+    deck_id = random.randrange(1 << 30, 1 << 31)
+    deck = genanki.Deck(deck_id, '跟读助手生词本')
+    
+    # 修复 Model 字段：增加 IPA 和 RU
+    my_model = genanki.Model(
+        random.randrange(1 << 30, 1 << 31),
+        'Simple Model with Audio',
+        fields=[
+            {'name': 'Question'}, 
+            {'name': 'Answer'}, 
+            {'name': 'Audio'}
+        ],
+        templates=[
+            {
+                'name': 'Card 1',
+                'qfmt': '{{Question}}<br>{{Audio}}', # 正面：单词+音标+发音
+                'afmt': '{{FrontSide}}<hr id="answer">{{Answer}}', # 背面：释义
+            }
+        ])
+
+    media_files = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for idx, item in enumerate(selected_items):
+        status_text.text(f"正在生成音频: {item['word']}...")
+        
+        # 1. 生成音频 (复用核心函数，确保引擎一致)
+        audio_data, _ = await get_audio_bytes_mixed(
+            item['word'], engine_type, voice_id, speed_int, app_config
+        )
+        
+        audio_filename = ""
+        if audio_data:
+            audio_filename = f"anki_audio_{random.randint(1000,9999)}_{idx}.mp3"
+            # 写入本地临时文件给 genanki 读取
+            with open(audio_filename, "wb") as f:
+                f.write(audio_data)
+            media_files.append(audio_filename)
+        
+        # 2. 准备内容 (修复内容缺失)
+        # 正面：单词 + 音标 (灰色小字)
+        word_field = f"{item['word']} <br> <span style='color:grey; font-size: 0.8em;'>{item.get('ipa', '')}</span>"
+        
+        # 背面：中文 + 俄语 (换行)
+        meaning_field = f"🇨🇳 {item.get('zh', '')} <br> 🇷🇺 {item.get('ru', '')}"
+        
+        # 音频字段
+        audio_field = f"[sound:{audio_filename}]" if audio_filename else ""
+
+        # 3. 添加笔记
+        note = genanki.Note(
+            model=my_model,
+            fields=[word_field, meaning_field, audio_field]
+        )
+        deck.add_note(note)
+        
+        progress_bar.progress((idx + 1) / len(selected_items))
+
+    # 打包
+    status_text.text("正在打包 .apkg 文件...")
+    output_package = genanki.Package(deck)
+    output_package.media_files = media_files
+    
+    # 写入内存流
+    pkg_bytes = io.BytesIO()
+    # genanki 需要写临时文件
+    temp_pkg_name = "temp_anki_output.apkg"
+    output_package.write_to_file(temp_pkg_name)
+    
+    with open(temp_pkg_name, "rb") as f:
+        final_bytes = f.read()
+    
+    # 清理临时文件
+    os.remove(temp_pkg_name)
+    for f in media_files:
+        if os.path.exists(f): os.remove(f)
+        
+    progress_bar.empty()
+    status_text.empty()
+    return final_bytes
+
+# ================= 5. API 查词与翻译 =================
 def silicon_ocr_multilang(image, api_key, model_id):
     client = OpenAI(api_key=api_key, base_url="https://api.siliconflow.cn/v1"); base64_image = compress_image(image)
     try: response = client.chat.completions.create(model=model_id, messages=[{"role": "user", "content": [{"type": "text", "text": "Extract all legible text. Keep original language."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}]); return response.choices[0].message.content, None
@@ -170,9 +234,9 @@ def silicon_translate_text(text, api_key, model_id, system_prompt):
     try: response = client.chat.completions.create(model=model_id, messages=[{"role": "user", "content": full_prompt}]); return response.choices[0].message.content, None
     except Exception as e: return None, str(e)
 
-# ================= 5. 界面 UI =================
+# ================= 6. 界面 UI =================
 
-st.title("🦋 跟读助手 Pro (V10.10 安全版)")
+st.title("🦋 跟读助手 (V11.0)")
 
 if 'vocab_book' not in st.session_state: st.session_state.vocab_book = load_vocab()
 if 'current_text' not in st.session_state: st.session_state.current_text = ""
@@ -182,34 +246,30 @@ if 'temp_word_audio' not in st.session_state: st.session_state.temp_word_audio =
 
 with st.sidebar:
     st.header("⚙️ 设置")
-    local_ip = get_local_ip()
-    if local_ip != "127.0.0.1": st.caption(f"🏠 局域网: http://{local_ip}:8501")
-
-    # Key (每次刷新都重置为空，除非 Session 有值)
+    
+    # Key (不保存到本地文件)
     default_key = st.session_state.app_config.get("api_key", "")
     api_input = st.text_input("SiliconFlow Key", value=default_key, type="password")
-    
-    # 仅更新内存中的 Session，不保存到文件
     if api_input != st.session_state.app_config.get("api_key"):
         st.session_state.app_config["api_key"] = api_input
 
     st.divider()
-    tts_engine = st.radio("🔊 语音引擎", ["Edge (本地推荐)", "SiliconFlow (云端/付费)", "Google (云端保底)"], index=0)
+    tts_engine = st.radio("🔊 语音引擎", ["Edge (推荐/免费)", "SiliconFlow (付费)"], index=0)
     
     voice_id = "default"
-    if tts_engine == "SiliconFlow (云端/付费)":
-        st.info("💎 CosyVoice2 (效果好)")
+    if tts_engine == "SiliconFlow (付费)":
+        st.info("💎 CosyVoice2 (支持倍速)")
         voice_choice = st.selectbox("🎙️ 选择音色", list(VOICE_MAP_SF.keys()))
         voice_id = VOICE_MAP_SF[voice_choice]
         
-    elif tts_engine == "Edge (本地推荐)":
+    elif tts_engine == "Edge (推荐/免费)":
         lang_choice_temp = st.selectbox("🌍 语言预览", list(VOICE_MAP_EDGE.keys()), index=0, key="edge_lang_prev")
         available_voices = VOICE_MAP_EDGE[lang_choice_temp]
         voice_id = st.radio("🎙️ 音色", [v[0] for v in available_voices], format_func=lambda x: next(v[1] for v in available_voices if v[0] == x))
 
     st.divider()
     lang_choice = st.selectbox("🌍 学习语言", list(VOICE_MAP_EDGE.keys()), index=0)
-    speed_int = st.slider("🐇 语速", -50, 50, 0, 5); rate_str = f"{speed_int:+d}%"
+    speed_int = st.slider("🐇 语速调节", -50, 50, 0, 5, help="Edge: 百分比 | CosyVoice: 0.5x-1.5x")
     
     if not api_input: st.warning("⚠️ 请输入 Key"); st.stop()
 
@@ -233,10 +293,11 @@ with col1:
         st.markdown("---")
         final_text = st.text_area("正文", value=st.session_state.current_text, height=200)
         
-        if st.button(f"▶️ 播放 ({tts_engine})", type="primary", use_container_width=True):
+        if st.button(f"▶️ 播放语音", type="primary", use_container_width=True):
             with st.spinner(f"正在生成..."):
+                # 🔥 传入 speed_int
                 ab, err = asyncio.run(get_audio_bytes_mixed(
-                    final_text, tts_engine, voice_id, rate_str, lang_choice, st.session_state.app_config
+                    final_text, tts_engine, voice_id, speed_int, st.session_state.app_config
                 ))
                 if ab: st.session_state.audio_cache = ab; st.rerun()
                 else: st.error(err)
@@ -282,16 +343,19 @@ with col2:
                     if st.checkbox("", key=unique_key): checked_items.append(item)
                 with c_wd:
                     st.markdown(f"**{item['word']}**")
+                    # 显示 IPA
                     if item.get('ipa'): st.caption(f"[{item['ipa']}]")
                     if st.button("🔊", key=f"p_{item['word']}_{d}_{idx}"):
-                        ab, _ = asyncio.run(get_audio_bytes_mixed(item['word'], tts_engine, voice_id, "+0%", lang_choice, st.session_state.app_config))
+                        # 🔥 单词播放也传入 speed_int
+                        ab, _ = asyncio.run(get_audio_bytes_mixed(item['word'], tts_engine, voice_id, speed_int, st.session_state.app_config))
                         if ab: st.session_state.temp_word_audio[item['word']] = ab; st.rerun()
                 with c_ph:
                     st.markdown(f"🇨🇳 {item.get('zh','')}")
+                    # 显示俄语
                     st.markdown(f"🇷🇺 {item.get('ru','')}")
                 
                 if item['word'] in st.session_state.temp_word_audio:
-                    st.audio(st.session_state.temp_word_audio[item['word']], format="audio/mpeg", autoplay=True)
+                    st.audio(st.session_state.temp_word_audio[item['word']], autoplay=True)
                     del st.session_state.temp_word_audio[item['word']]
             st.divider()
 
@@ -299,9 +363,12 @@ with col2:
             st.info(f"选中 {len(checked_items)} 个单词")
             col_exp, col_del = st.columns(2)
             with col_exp:
-                if st.button("📤 导出Anki包"):
-                    with st.spinner("打包中..."):
-                        apkg_bytes = asyncio.run(create_anki_package(checked_items))
+                if st.button("📤 导出Anki (带音频)"):
+                    with st.spinner("正在生成Anki包 (包含音频)..."):
+                        # 🔥 传入所有配置参数，确保Anki音频和当前设置一致
+                        apkg_bytes = asyncio.run(create_anki_package(
+                            checked_items, tts_engine, voice_id, speed_int, st.session_state.app_config
+                        ))
                         st.download_button("⬇️ 下载 .apkg", data=apkg_bytes, file_name=f"anki_{datetime.now().strftime('%m%d')}.apkg")
             with col_del:
                 if st.button("🗑️ 删除选中"):
