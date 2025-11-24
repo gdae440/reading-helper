@@ -14,12 +14,11 @@ import socket
 
 # ================= 1. 环境与配置管理 =================
 
-# 强制清除本地代理
 for key in ["all_proxy", "http_proxy", "https_proxy"]:
     if key in os.environ: del os.environ[key]
 os.environ["no_proxy"] = "localhost,127.0.0.1,::1"
 
-st.set_page_config(page_title="跟读助手 Pro (云端版)", layout="wide", page_icon="🦋")
+st.set_page_config(page_title="跟读助手 Pro (V9.4)", layout="wide", page_icon="🦋")
 
 VOCAB_FILE = "my_vocab.json"
 CONFIG_FILE = "config.json"
@@ -33,34 +32,26 @@ def get_local_ip():
         return ip
     except: return "127.0.0.1"
 
-# --- 核心：多层级配置加载 ---
 def load_config():
-    # 1. 默认配置
     config = {
         "chat_model": "deepseek-ai/DeepSeek-V3",
         "ocr_model": "Qwen/Qwen2.5-VL-72B-Instruct",
         "trans_prompt": "Translate the following text into fluent, natural Chinese.",
         "api_key": ""
     }
-    
-    # 2. 尝试从 Streamlit Secrets 读取 (云端优先)
     try:
         if "SILICON_KEY" in st.secrets:
             config["api_key"] = st.secrets["SILICON_KEY"]
     except: pass
-
-    # 3. 尝试从本地 config.json 读取 (本地覆盖)
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
                 config.update(saved)
         except: pass
-    
     return config
 
 def save_config(config_dict):
-    # 只在本地写入，云端忽略错误
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(config_dict, f, ensure_ascii=False, indent=2)
@@ -157,24 +148,18 @@ async def create_anki_package(selected_items):
     progress_bar.empty()
     return final_bytes
 
-async def generate_tts_file(text, voice, rate_str, filename="speech_output.mp3"):
-    if os.path.exists(filename): 
-        try: os.remove(filename)
-        except: pass
+# 🔥 核心修改：改用内存流，不再存文件，更稳定，并增加错误返回
+async def get_audio_bytes_memory(text, voice, rate_str):
     try:
         communicate = edge_tts.Communicate(text, voice, rate=rate_str)
-        await communicate.save(filename)
-        return filename, None
-    except Exception as e: return None, str(e)
-
-async def get_word_audio_bytes(text, voice):
-    try:
-        communicate = edge_tts.Communicate(text, voice, rate="+0%")
-        audio_stream = io.BytesIO()
+        # 使用内存 buffer
+        mp3_fp = io.BytesIO()
         async for chunk in communicate.stream():
-            if chunk["type"] == "audio": audio_stream.write(chunk["data"])
-        return audio_stream.getvalue(), None
-    except Exception as e: return None, str(e)
+            if chunk["type"] == "audio":
+                mp3_fp.write(chunk["data"])
+        return mp3_fp.getvalue(), None
+    except Exception as e:
+        return None, str(e)
 
 def silicon_ocr_multilang(image, api_key, model_id):
     client = OpenAI(api_key=api_key, base_url="https://api.siliconflow.cn/v1")
@@ -216,7 +201,7 @@ def silicon_translate_text(text, api_key, model_id, system_prompt):
 
 # ================= 5. 界面 UI =================
 
-st.title("🦋 跟读助手 Pro (Cloud)")
+st.title("🦋 跟读助手 Pro (V9.4)")
 
 if 'vocab_book' not in st.session_state: st.session_state.vocab_book = load_vocab()
 if 'current_text' not in st.session_state: st.session_state.current_text = ""
@@ -227,19 +212,12 @@ if 'temp_word_audio' not in st.session_state: st.session_state.temp_word_audio =
 # --- 侧边栏 ---
 with st.sidebar:
     st.header("⚙️ 设置")
-    
-    # 局域网 IP 显示
     local_ip = get_local_ip()
-    if local_ip != "127.0.0.1":
-        st.caption(f"🏠 局域网地址: http://{local_ip}:8501")
+    if local_ip != "127.0.0.1": st.caption(f"🏠 局域网地址: http://{local_ip}:8501")
 
-    # API Key 逻辑：优先读取 Session (Config/Secrets)
     default_key_val = st.session_state.app_config.get("api_key", "")
-    
-    # 输入框
     api_input = st.text_input("SiliconFlow Key", value=default_key_val, type="password")
 
-    # 保存逻辑 (仅本地生效)
     if api_input != st.session_state.app_config.get("api_key"):
         st.session_state.app_config["api_key"] = api_input
         save_config(st.session_state.app_config)
@@ -248,13 +226,11 @@ with st.sidebar:
         chat_model_input = st.text_input("模型", value=st.session_state.app_config.get("chat_model", "deepseek-ai/DeepSeek-V3"))
         ocr_model_input = st.text_input("OCR", value=st.session_state.app_config.get("ocr_model", "Qwen/Qwen2.5-VL-72B-Instruct"))
         trans_prompt_input = st.text_area("翻译提示词", value=st.session_state.app_config.get("trans_prompt", ""), height=80)
-        # 保存模型配置
-        if chat_model_input != st.session_state.app_config.get("chat_model"):
-            st.session_state.app_config["chat_model"] = chat_model_input; save_config(st.session_state.app_config)
-        if ocr_model_input != st.session_state.app_config.get("ocr_model"):
-            st.session_state.app_config["ocr_model"] = ocr_model_input; save_config(st.session_state.app_config)
-        if trans_prompt_input != st.session_state.app_config.get("trans_prompt"):
-            st.session_state.app_config["trans_prompt"] = trans_prompt_input; save_config(st.session_state.app_config)
+        
+        # 实时保存配置
+        for k, v in [("chat_model", chat_model_input), ("ocr_model", ocr_model_input), ("trans_prompt", trans_prompt_input)]:
+            if v != st.session_state.app_config.get(k):
+                st.session_state.app_config[k] = v; save_config(st.session_state.app_config)
 
     st.divider()
     lang_choice = st.selectbox("🌍 语言", list(VOICE_MAP.keys()), index=0)
@@ -262,7 +238,6 @@ with st.sidebar:
     voice_id = st.radio("🎙️ 声音", [v[0] for v in available_voices], format_func=lambda x: next(v[1] for v in available_voices if v[0] == x))
     speed_int = st.slider("🐇 语速", -50, 50, 0, 5); rate_str = f"{speed_int:+d}%"
 
-    # ⛔️ 阻断逻辑：只有当没有任何 Key 时才停止
     if not api_input:
         st.warning("⚠️ 请输入 API Key 才能开始使用")
         st.stop()
@@ -280,16 +255,12 @@ with col1:
                 img = Image.open(uploaded)
                 res, err = silicon_ocr_multilang(img, api_input, ocr_model_input)
                 if res: 
-                    st.session_state.current_text = res
-                    st.session_state.translation_result = "" 
-                    st.rerun()
+                    st.session_state.current_text = res; st.session_state.translation_result = ""; st.rerun()
                 else: st.error(f"失败: {err}")
     with tab_txt:
         txt = st.text_area("输入文本", height=100)
         if st.button("确认文本"): 
-            st.session_state.current_text = txt
-            st.session_state.translation_result = "" 
-            st.rerun()
+            st.session_state.current_text = txt; st.session_state.translation_result = ""; st.rerun()
 
     if st.session_state.current_text:
         st.markdown("---")
@@ -299,9 +270,14 @@ with col1:
         with c_tts:
             if st.button(f"▶️ 播放语音 ({rate_str})", type="primary", use_container_width=True):
                 with st.spinner("合成语音中..."):
-                    asyncio.run(generate_tts_file(final_text, voice_id, rate_str))
-                    if os.path.exists("speech_output.mp3"):
-                        with open("speech_output.mp3", "rb") as f: st.session_state.audio_cache = f.read()
+                    # 🔥 调用新的内存函数，并捕获错误
+                    audio_bytes, audio_err = asyncio.run(get_audio_bytes_memory(final_text, voice_id, rate_str))
+                    
+                    if audio_bytes:
+                        st.session_state.audio_cache = audio_bytes
+                        st.rerun() # 强制刷新以加载音频
+                    else:
+                        st.error(f"语音合成失败: {audio_err}")
         
         if st.session_state.audio_cache:
             st.audio(st.session_state.audio_cache, format='audio/mpeg')
@@ -314,7 +290,6 @@ with col1:
                     else: st.error(f"翻译失败: {trans_err}")
             
             if st.session_state.translation_result:
-                st.markdown("#### 翻译结果：")
                 st.info(st.session_state.translation_result)
 
 with col2:
@@ -365,7 +340,8 @@ with col2:
                     st.markdown(f"**{item['word']}**")
                     if item.get('ipa'): st.caption(f"[{item['ipa']}]")
                     if st.button("🔊", key=f"p_{item['word']}_{d}_{idx}"):
-                        adata, _ = asyncio.run(get_word_audio_bytes(item['word'], voice_id))
+                        # 🔥 单词播放也改用内存模式
+                        adata, _ = asyncio.run(get_audio_bytes_memory(item['word'], voice_id, "+0%"))
                         if adata: st.session_state.temp_word_audio[item['word']] = adata; st.rerun()
                 with c_ph:
                     st.markdown(f"🇨🇳 {item.get('zh','')}")
