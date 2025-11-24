@@ -19,7 +19,7 @@ for key in ["all_proxy", "http_proxy", "https_proxy"]:
     if key in os.environ: del os.environ[key]
 os.environ["no_proxy"] = "localhost,127.0.0.1,::1"
 
-st.set_page_config(page_title="跟读助手 Pro (V10.5 最终版)", layout="wide", page_icon="🦋")
+st.set_page_config(page_title="跟读助手 Pro (V10.6 净化版)", layout="wide", page_icon="🦋")
 
 VOCAB_FILE = "my_vocab.json"
 CONFIG_FILE = "config.json"
@@ -39,7 +39,6 @@ def load_config():
         "ocr_model": "Qwen/Qwen2.5-VL-72B-Instruct",
         "trans_prompt": "Translate the following text into fluent, natural Chinese.",
         "api_key": "",
-        # 默认锁定到存在的 V2 模型
         "sf_tts_model_id": "FunAudioLLM/CosyVoice2-0.5B" 
     }
     try:
@@ -72,8 +71,7 @@ VOICE_MAP_EDGE = {
     "🇷🇺 俄语": [("ru-RU-DmitryNeural", "Dmitry (俄/男)"), ("ru-RU-SvetlanaNeural", "Svetlana (俄/女)")],
 }
 
-# 2. SiliconFlow 音色 (CosyVoice2 严格格式)
-# 格式必须是 "模型ID:音色名"
+# 2. SiliconFlow CosyVoice2 (已验证可用)
 VOICE_MAP_SF = {
     "男声 - Benjamin (英伦风)": "FunAudioLLM/CosyVoice2-0.5B:benjamin", 
     "男声 - Alex (沉稳)": "FunAudioLLM/CosyVoice2-0.5B:alex",
@@ -83,13 +81,6 @@ VOICE_MAP_SF = {
     "女声 - Anna (新闻)": "FunAudioLLM/CosyVoice2-0.5B:anna",
     "女声 - Bella (温柔)": "FunAudioLLM/CosyVoice2-0.5B:bella",
     "女声 - Claire (清晰)": "FunAudioLLM/CosyVoice2-0.5B:claire"
-}
-
-# 3. Fish Audio (备选)
-VOICE_MAP_FISH = {
-    "Fish - Benjamin": "fishaudio/fish-speech-1.4:benjamin",
-    "Fish - Alex": "fishaudio/fish-speech-1.4:alex",
-    "Fish - Anna": "fishaudio/fish-speech-1.4:anna"
 }
 
 GTTS_LANG_MAP = {"🇬🇧 英语": "en", "🇫🇷 法语": "fr", "🇩🇪 德语": "de", "🇷🇺 俄语": "ru"}
@@ -127,24 +118,20 @@ async def get_audio_bytes_mixed(text, engine_type, voice_id, rate_str, lang_choi
         if not api_key: return None, "请先输入 API Key"
         client = OpenAI(api_key=api_key, base_url="https://api.siliconflow.cn/v1")
         
-        # 自动解析模型ID (冒号前面部分)
-        # 例如 voice_id = "FunAudioLLM/CosyVoice2-0.5B:alex"
-        # 则 model_id = "FunAudioLLM/CosyVoice2-0.5B"
-        if ":" in voice_id:
-            model_id = voice_id.split(":")[0]
-        else:
-            model_id = "FunAudioLLM/CosyVoice2-0.5B" # 默认兜底
-            
+        # 自动解析模型ID (默认锁定 V2)
+        model_id = "FunAudioLLM/CosyVoice2-0.5B"
+        if ":" in voice_id: model_id = voice_id.split(":")[0]
+
         try:
             response = client.audio.speech.create(
                 model=model_id,
-                voice=voice_id, # 🔥 传完整 ID，不做切割
+                voice=voice_id, # 传完整ID
                 input=text,
                 speed=1.0 
             )
             return response.content, None
         except Exception as e: 
-            return None, f"SF TTS 失败 (Model: {model_id}): {e}"
+            return None, f"SF TTS 失败: {e}"
 
     # 3. Google
     elif engine_type == "Google (云端保底)":
@@ -193,7 +180,7 @@ def silicon_translate_text(text, api_key, model_id, system_prompt):
 
 # ================= 5. 界面 UI =================
 
-st.title("🦋 跟读助手 Pro (V10.5 最终版)")
+st.title("🦋 跟读助手 Pro (V10.6 净化版)")
 
 if 'vocab_book' not in st.session_state: st.session_state.vocab_book = load_vocab()
 if 'current_text' not in st.session_state: st.session_state.current_text = ""
@@ -206,6 +193,7 @@ with st.sidebar:
     local_ip = get_local_ip()
     if local_ip != "127.0.0.1": st.caption(f"🏠 局域网: http://{local_ip}:8501")
 
+    # Key
     default_key = st.session_state.app_config.get("api_key", "")
     api_input = st.text_input("SiliconFlow Key", value=default_key, type="password")
     if api_input != st.session_state.app_config.get("api_key"):
@@ -216,19 +204,10 @@ with st.sidebar:
     
     voice_id = "default"
     if tts_engine == "SiliconFlow (云端/付费)":
+        st.info("💎 CosyVoice2 (效果好)")
+        voice_choice = st.selectbox("🎙️ 选择音色", list(VOICE_MAP_SF.keys()))
+        voice_id = VOICE_MAP_SF[voice_choice]
         
-        # 子引擎选择
-        sf_sub_engine = st.radio("模型选择", ["CosyVoice2 (推荐)", "Fish Speech (备用)"], horizontal=True)
-        
-        if sf_sub_engine == "CosyVoice2 (推荐)":
-            st.info("💎 CosyVoice2 (官方音色)")
-            voice_choice = st.selectbox("🎙️ 选择音色", list(VOICE_MAP_SF.keys()))
-            voice_id = VOICE_MAP_SF[voice_choice]
-        else:
-            st.info("🐟 Fish Speech (若可用)")
-            voice_choice = st.selectbox("🎙️ 选择音色", list(VOICE_MAP_FISH.keys()))
-            voice_id = VOICE_MAP_FISH[voice_choice]
-
     elif tts_engine == "Edge (本地推荐)":
         lang_choice_temp = st.selectbox("🌍 语言预览", list(VOICE_MAP_EDGE.keys()), index=0, key="edge_lang_prev")
         available_voices = VOICE_MAP_EDGE[lang_choice_temp]
