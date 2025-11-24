@@ -1,0 +1,5 @@
+config.json
+my_vocab.json
+venv/
+__pycache__/
+.DS_Store
