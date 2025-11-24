@@ -19,7 +19,7 @@ for key in ["all_proxy", "http_proxy", "https_proxy"]:
     if key in os.environ: del os.environ[key]
 os.environ["no_proxy"] = "localhost,127.0.0.1,::1"
 
-st.set_page_config(page_title="跟读助手 Pro (V10.1 Ollie版)", layout="wide", page_icon="🦋")
+st.set_page_config(page_title="跟读助手 Pro (V10.3 完整版)", layout="wide", page_icon="🦋")
 
 VOCAB_FILE = "my_vocab.json"
 CONFIG_FILE = "config.json"
@@ -61,32 +61,26 @@ def save_config(config_dict):
 if 'app_config' not in st.session_state:
     st.session_state.app_config = load_config()
 
-# ================= 2. 核心数据 (音色库) =================
+# ================= 2. 核心数据 =================
 
-# 1. Edge 本地音色 (免费/高质量)
-# 注意：Ollie 是 Azure 付费音色，Edge 接口不一定开放，标为“尝试”
+# 1. Edge 本地音色
 VOICE_MAP_EDGE = {
-    "🇬🇧 英语": [
-        ("en-GB-RyanNeural", "Ryan (标准英音/男)"), 
-        ("en-GB-SoniaNeural", "Sonia (标准英音/女)"),
-        ("en-GB-OllieNeural", "Ollie (磁性英音/男-尝试)"), # 🔥 你想要的 Ollie
-        ("en-US-ChristopherNeural", "Chris (美音/男)"),
-        ("en-US-AriaNeural", "Aria (美音/女)")
-    ],
+    "🇬🇧 英语": [("en-GB-RyanNeural", "Ryan (英/男)"), ("en-US-ChristopherNeural", "Chris (美/男)"), ("en-US-AriaNeural", "Aria (美/女)")],
     "🇫🇷 法语": [("fr-FR-HenriNeural", "Henri (法/男)"), ("fr-FR-DeniseNeural", "Denise (法/女)")],
     "🇩🇪 德语": [("de-DE-ConradNeural", "Conrad (德/男)"), ("de-DE-KatjaNeural", "Katja (德/女)")],
     "🇷🇺 俄语": [("ru-RU-DmitryNeural", "Dmitry (俄/男)"), ("ru-RU-SvetlanaNeural", "Svetlana (俄/女)")],
 }
 
-# 2. SiliconFlow 音色 (CosyVoice2)
+# 2. SiliconFlow 音色
 VOICE_MAP_SF = {
-    "默认女声 (Alex)": "alex",
-    "默认男声 (Bob)": "bob", 
-    "新闻主播 (Anna)": "anna",
-    "英伦男声 (Benjamin)": "benjamin", # 🔥 类似 Ollie 的风格
-    "深沉男声 (Charles)": "charles",
-    "OpenAI风格-女 (Nova)": "nova",
-    "OpenAI风格-男 (Echo)": "echo"
+    "男声 - Alex (沉稳)": "FunAudioLLM/CosyVoice2-0.5B:alex",
+    "男声 - Benjamin (深沉)": "FunAudioLLM/CosyVoice2-0.5B:benjamin", 
+    "男声 - Charles (磁性)": "FunAudioLLM/CosyVoice2-0.5B:charles",
+    "男声 - David (欢快)": "FunAudioLLM/CosyVoice2-0.5B:david",
+    "女声 - Anna (沉稳)": "FunAudioLLM/CosyVoice2-0.5B:anna",
+    "女声 - Bella (热情)": "FunAudioLLM/CosyVoice2-0.5B:bella",
+    "女声 - Claire (温柔)": "FunAudioLLM/CosyVoice2-0.5B:claire",
+    "女声 - Diana (欢快)": "FunAudioLLM/CosyVoice2-0.5B:diana"
 }
 
 GTTS_LANG_MAP = {"🇬🇧 英语": "en", "🇫🇷 法语": "fr", "🇩🇪 德语": "de", "🇷🇺 俄语": "ru"}
@@ -108,7 +102,6 @@ def compress_image(image):
 # ================= 3. 音频处理核心 =================
 
 async def get_audio_bytes_mixed(text, engine_type, voice_id, rate_str, lang_choice, app_config):
-    
     # 1. Edge
     if engine_type == "Edge (本地推荐)":
         try:
@@ -117,17 +110,18 @@ async def get_audio_bytes_mixed(text, engine_type, voice_id, rate_str, lang_choi
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio": mp3_fp.write(chunk["data"])
             return mp3_fp.getvalue(), None
-        except Exception as e: return None, f"Edge ({voice_id}) 失败: {e} (Ollie可能未开放，请换Ryan)"
+        except Exception as e: return None, f"Edge ({voice_id}) 失败: {e}"
 
     # 2. SiliconFlow (付费)
     elif engine_type == "SiliconFlow (云端/付费)":
         api_key = app_config["api_key"]
         if not api_key: return None, "请先输入 API Key"
         client = OpenAI(api_key=api_key, base_url="https://api.siliconflow.cn/v1")
+        real_voice = voice_id.split(":")[-1] 
         try:
             response = client.audio.speech.create(
                 model="FunAudioLLM/CosyVoice2-0.5B",
-                voice=voice_id,
+                voice=real_voice,
                 input=text,
                 speed=1.0 
             )
@@ -181,7 +175,7 @@ def silicon_translate_text(text, api_key, model_id, system_prompt):
 
 # ================= 5. 界面 UI =================
 
-st.title("🦋 跟读助手 Pro (V10.1 Ollie版)")
+st.title("🦋 跟读助手 Pro (V10.3 完整版)")
 
 if 'vocab_book' not in st.session_state: st.session_state.vocab_book = load_vocab()
 if 'current_text' not in st.session_state: st.session_state.current_text = ""
@@ -194,7 +188,7 @@ with st.sidebar:
     local_ip = get_local_ip()
     if local_ip != "127.0.0.1": st.caption(f"🏠 局域网: http://{local_ip}:8501")
 
-    # Key 配置
+    # Key
     default_key = st.session_state.app_config.get("api_key", "")
     api_input = st.text_input("SiliconFlow Key", value=default_key, type="password")
     if api_input != st.session_state.app_config.get("api_key"):
@@ -204,9 +198,8 @@ with st.sidebar:
     tts_engine = st.radio("🔊 语音引擎", ["Edge (本地推荐)", "SiliconFlow (云端/付费)", "Google (云端保底)"], index=0)
     
     voice_id = "default"
-    
     if tts_engine == "SiliconFlow (云端/付费)":
-        st.info("💎 使用 CosyVoice2")
+        st.info("💎 CosyVoice2 (效果好)")
         voice_choice = st.selectbox("🎙️ 选择音色", list(VOICE_MAP_SF.keys()))
         voice_id = VOICE_MAP_SF[voice_choice]
         
@@ -241,7 +234,6 @@ with col1:
         st.markdown("---")
         final_text = st.text_area("正文", value=st.session_state.current_text, height=200)
         
-        # 播放
         if st.button(f"▶️ 播放 ({tts_engine})", type="primary", use_container_width=True):
             with st.spinner(f"正在生成..."):
                 ab, err = asyncio.run(get_audio_bytes_mixed(
@@ -253,7 +245,6 @@ with col1:
         if st.session_state.audio_cache:
             st.audio(st.session_state.audio_cache, format='audio/mpeg')
 
-        # 翻译
         with st.expander("🇨🇳 全文翻译", expanded=False):
             if st.button("🚀 翻译"):
                 res, _ = silicon_translate_text(final_text, api_input, "deepseek-ai/DeepSeek-V3", "Translate to Chinese.")
@@ -267,17 +258,62 @@ with col2:
         if c2.form_submit_button("🔍"):
             info, _ = silicon_vocab_lookup_multilang(wq, api_input, "deepseek-ai/DeepSeek-V3")
             if info: 
-                st.session_state.vocab_book.insert(0, {"word": wq, "lang": lang_choice, "date": "Today", **info})
+                st.session_state.vocab_book.insert(0, {"word": wq, "lang": lang_choice, "date": datetime.now().strftime("%Y-%m-%d"), **info})
                 save_vocab(st.session_state.vocab_book)
                 st.rerun()
 
     st.divider()
-    for item in st.session_state.vocab_book[:5]:
-        c1, c2 = st.columns([0.8, 0.2])
-        c1.markdown(f"**{item['word']}** {item.get('ipa','')}\n\n{item.get('zh','')}")
-        if c2.button("🔊", key=f"p_{item['word']}"):
-            ab, _ = asyncio.run(get_audio_bytes_mixed(item['word'], tts_engine, voice_id, "+0%", lang_choice, st.session_state.app_config))
-            if ab: st.session_state.temp_word_audio[item['word']] = ab; st.rerun()
-        if item['word'] in st.session_state.temp_word_audio:
-            st.audio(st.session_state.temp_word_audio[item['word']], autoplay=True)
-            del st.session_state.temp_word_audio[item['word']]
+    
+    # 🔥🔥🔥 恢复的完整列表逻辑 🔥🔥🔥
+    filtered_vocab = [v for v in st.session_state.vocab_book if v.get('lang', '🇬🇧 英语') == lang_choice]
+    
+    if filtered_vocab:
+        checked_items = []
+        grouped = {}
+        # 按日期分组
+        for item in filtered_vocab:
+            d = item.get('date', 'Unknown')
+            if d not in grouped: grouped[d] = []
+            grouped[d].append(item)
+            
+        for d, items in grouped.items():
+            st.caption(f"📅 {d}")
+            for idx, item in enumerate(items):
+                c_chk, c_wd, c_ph = st.columns([0.1, 0.4, 0.5])
+                with c_chk:
+                    # ✅ 复选框回来了
+                    unique_key = f"chk_{item['word']}_{d}_{idx}" 
+                    if st.checkbox("", key=unique_key): checked_items.append(item)
+                with c_wd:
+                    st.markdown(f"**{item['word']}**")
+                    if item.get('ipa'): st.caption(f"[{item['ipa']}]")
+                    if st.button("🔊", key=f"p_{item['word']}_{d}_{idx}"):
+                        ab, _ = asyncio.run(get_audio_bytes_mixed(item['word'], tts_engine, voice_id, "+0%", lang_choice, st.session_state.app_config))
+                        if ab: st.session_state.temp_word_audio[item['word']] = ab; st.rerun()
+                with c_ph:
+                    st.markdown(f"🇨🇳 {item.get('zh','')}")
+                    # ✅ 俄语回来了
+                    st.markdown(f"🇷🇺 {item.get('ru','')}")
+                
+                if item['word'] in st.session_state.temp_word_audio:
+                    st.audio(st.session_state.temp_word_audio[item['word']], format="audio/mpeg", autoplay=True)
+                    del st.session_state.temp_word_audio[item['word']]
+            st.divider()
+
+        # ✅ 底部功能区回来了
+        if checked_items:
+            st.info(f"选中 {len(checked_items)} 个单词")
+            col_exp, col_del = st.columns(2)
+            with col_exp:
+                if st.button("📤 导出Anki包"):
+                    with st.spinner("打包中..."):
+                        apkg_bytes = asyncio.run(create_anki_package(checked_items))
+                        st.download_button("⬇️ 下载 .apkg", data=apkg_bytes, file_name=f"anki_{datetime.now().strftime('%m%d')}.apkg")
+            with col_del:
+                if st.button("🗑️ 删除选中"):
+                    rem_words = [i['word'] for i in checked_items]
+                    st.session_state.vocab_book = [i for i in st.session_state.vocab_book if i['word'] not in rem_words]
+                    save_vocab(st.session_state.vocab_book)
+                    st.rerun()
+    else:
+        st.caption(f"暂无 {lang_choice} 生词")
