@@ -19,7 +19,7 @@ for key in ["all_proxy", "http_proxy", "https_proxy"]:
     if key in os.environ: del os.environ[key]
 os.environ["no_proxy"] = "localhost,127.0.0.1,::1"
 
-st.set_page_config(page_title="跟读助手 Pro (V10.3 完整版)", layout="wide", page_icon="🦋")
+st.set_page_config(page_title="跟读助手 Pro (V10.4 稳定版)", layout="wide", page_icon="🦋")
 
 VOCAB_FILE = "my_vocab.json"
 CONFIG_FILE = "config.json"
@@ -39,7 +39,8 @@ def load_config():
         "ocr_model": "Qwen/Qwen2.5-VL-72B-Instruct",
         "trans_prompt": "Translate the following text into fluent, natural Chinese.",
         "api_key": "",
-        "sf_tts_model_id": "FunAudioLLM/CosyVoice2-0.5B" 
+        # 🔥 修正：默认回退到 V1 模型，因为它支持 alex/benjamin 等预设音色
+        "sf_tts_model_id": "FunAudioLLM/CosyVoice-300M-SFT" 
     }
     try:
         if "SILICON_KEY" in st.secrets: config["api_key"] = st.secrets["SILICON_KEY"]
@@ -71,16 +72,14 @@ VOICE_MAP_EDGE = {
     "🇷🇺 俄语": [("ru-RU-DmitryNeural", "Dmitry (俄/男)"), ("ru-RU-SvetlanaNeural", "Svetlana (俄/女)")],
 }
 
-# 2. SiliconFlow 音色
+# 2. SiliconFlow 音色 (CosyVoice V1 预设)
+# 这些音色在 CosyVoice-300M-SFT 模型下是肯定可用的
 VOICE_MAP_SF = {
-    "男声 - Alex (沉稳)": "FunAudioLLM/CosyVoice2-0.5B:alex",
-    "男声 - Benjamin (深沉)": "FunAudioLLM/CosyVoice2-0.5B:benjamin", 
-    "男声 - Charles (磁性)": "FunAudioLLM/CosyVoice2-0.5B:charles",
-    "男声 - David (欢快)": "FunAudioLLM/CosyVoice2-0.5B:david",
-    "女声 - Anna (沉稳)": "FunAudioLLM/CosyVoice2-0.5B:anna",
-    "女声 - Bella (热情)": "FunAudioLLM/CosyVoice2-0.5B:bella",
-    "女声 - Claire (温柔)": "FunAudioLLM/CosyVoice2-0.5B:claire",
-    "女声 - Diana (欢快)": "FunAudioLLM/CosyVoice2-0.5B:diana"
+    "男声 - Benjamin (英伦风)": "benjamin", 
+    "男声 - Alex (沉稳)": "alex",
+    "男声 - Bob (欢快)": "bob", 
+    "女声 - Anna (新闻)": "anna",
+    "女声 - Bella (温柔)": "bella"
 }
 
 GTTS_LANG_MAP = {"🇬🇧 英语": "en", "🇫🇷 法语": "fr", "🇩🇪 德语": "de", "🇷🇺 俄语": "ru"}
@@ -112,21 +111,25 @@ async def get_audio_bytes_mixed(text, engine_type, voice_id, rate_str, lang_choi
             return mp3_fp.getvalue(), None
         except Exception as e: return None, f"Edge ({voice_id}) 失败: {e}"
 
-    # 2. SiliconFlow (付费)
+    # 2. SiliconFlow (付费/CosyVoice)
     elif engine_type == "SiliconFlow (云端/付费)":
         api_key = app_config["api_key"]
         if not api_key: return None, "请先输入 API Key"
         client = OpenAI(api_key=api_key, base_url="https://api.siliconflow.cn/v1")
-        real_voice = voice_id.split(":")[-1] 
+        
+        # 🔥 关键修正：直接使用配置里的模型ID (默认为 V1)
+        model_id = app_config.get("sf_tts_model_id", "FunAudioLLM/CosyVoice-300M-SFT")
+        
         try:
             response = client.audio.speech.create(
-                model="FunAudioLLM/CosyVoice2-0.5B",
-                voice=real_voice,
+                model=model_id,
+                voice=voice_id, # 直接传 'alex', 'benjamin' 等
                 input=text,
                 speed=1.0 
             )
             return response.content, None
-        except Exception as e: return None, f"SF TTS 失败: {e}"
+        except Exception as e: 
+            return None, f"SF TTS 失败 (Model: {model_id}, Voice: {voice_id}): {e}"
 
     # 3. Google
     elif engine_type == "Google (云端保底)":
@@ -175,7 +178,7 @@ def silicon_translate_text(text, api_key, model_id, system_prompt):
 
 # ================= 5. 界面 UI =================
 
-st.title("🦋 跟读助手 Pro (V10.3 完整版)")
+st.title("🦋 跟读助手 Pro (V10.4 稳定版)")
 
 if 'vocab_book' not in st.session_state: st.session_state.vocab_book = load_vocab()
 if 'current_text' not in st.session_state: st.session_state.current_text = ""
@@ -199,10 +202,20 @@ with st.sidebar:
     
     voice_id = "default"
     if tts_engine == "SiliconFlow (云端/付费)":
-        st.info("💎 CosyVoice2 (效果好)")
+        st.info("💎 使用 CosyVoice (推荐)")
+        
+        # 1. 音色选择
         voice_choice = st.selectbox("🎙️ 选择音色", list(VOICE_MAP_SF.keys()))
         voice_id = VOICE_MAP_SF[voice_choice]
         
+        # 2. 模型高级配置 (允许用户改回 V2，或者自定义)
+        with st.expander("高级: 切换模型 ID"):
+            sf_model_input = st.text_input("Model ID", value=st.session_state.app_config.get("sf_tts_model_id", "FunAudioLLM/CosyVoice-300M-SFT"))
+            if sf_model_input != st.session_state.app_config.get("sf_tts_model_id"):
+                 st.session_state.app_config["sf_tts_model_id"] = sf_model_input
+                 save_config(st.session_state.app_config)
+            st.caption("默认 V1: FunAudioLLM/CosyVoice-300M-SFT (支持上述所有音色)\n若改为 V2: FunAudioLLM/CosyVoice2-0.5B (可能不支持某些音色名，需查阅文档)")
+
     elif tts_engine == "Edge (本地推荐)":
         lang_choice_temp = st.selectbox("🌍 语言预览", list(VOICE_MAP_EDGE.keys()), index=0, key="edge_lang_prev")
         available_voices = VOICE_MAP_EDGE[lang_choice_temp]
@@ -264,13 +277,12 @@ with col2:
 
     st.divider()
     
-    # 🔥🔥🔥 恢复的完整列表逻辑 🔥🔥🔥
+    # 完整列表逻辑
     filtered_vocab = [v for v in st.session_state.vocab_book if v.get('lang', '🇬🇧 英语') == lang_choice]
     
     if filtered_vocab:
         checked_items = []
         grouped = {}
-        # 按日期分组
         for item in filtered_vocab:
             d = item.get('date', 'Unknown')
             if d not in grouped: grouped[d] = []
@@ -281,7 +293,6 @@ with col2:
             for idx, item in enumerate(items):
                 c_chk, c_wd, c_ph = st.columns([0.1, 0.4, 0.5])
                 with c_chk:
-                    # ✅ 复选框回来了
                     unique_key = f"chk_{item['word']}_{d}_{idx}" 
                     if st.checkbox("", key=unique_key): checked_items.append(item)
                 with c_wd:
@@ -292,7 +303,6 @@ with col2:
                         if ab: st.session_state.temp_word_audio[item['word']] = ab; st.rerun()
                 with c_ph:
                     st.markdown(f"🇨🇳 {item.get('zh','')}")
-                    # ✅ 俄语回来了
                     st.markdown(f"🇷🇺 {item.get('ru','')}")
                 
                 if item['word'] in st.session_state.temp_word_audio:
@@ -300,7 +310,6 @@ with col2:
                     del st.session_state.temp_word_audio[item['word']]
             st.divider()
 
-        # ✅ 底部功能区回来了
         if checked_items:
             st.info(f"选中 {len(checked_items)} 个单词")
             col_exp, col_del = st.columns(2)
