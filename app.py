@@ -19,10 +19,11 @@ for key in ["all_proxy", "http_proxy", "https_proxy"]:
     if key in os.environ: del os.environ[key]
 os.environ["no_proxy"] = "localhost,127.0.0.1,::1"
 
-st.set_page_config(page_title="跟读助手 Pro (V10.6 净化版)", layout="wide", page_icon="🦋")
+st.set_page_config(page_title="跟读助手 Pro (V10.10 安全版)", layout="wide", page_icon="🦋")
 
 VOCAB_FILE = "my_vocab.json"
-CONFIG_FILE = "config.json"
+# 云端不再读取或写入 config.json，防止隐私泄露
+# CONFIG_FILE = "config.json" 
 
 def get_local_ip():
     try:
@@ -41,22 +42,14 @@ def load_config():
         "api_key": "",
         "sf_tts_model_id": "FunAudioLLM/CosyVoice2-0.5B" 
     }
+    # 仅从 Secrets 读取 (如果后台配了的话)，不再读取本地文件
     try:
         if "SILICON_KEY" in st.secrets: config["api_key"] = st.secrets["SILICON_KEY"]
     except: pass
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-                config.update(saved)
-        except: pass
     return config
 
-def save_config(config_dict):
-    try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config_dict, f, ensure_ascii=False, indent=2)
-    except: pass
+# 🔥 核心修改：删除了 save_config 函数
+# 这样在云端运行时，Key 永远不会被写入硬盘，别人刷新页面就是空的
 
 if 'app_config' not in st.session_state:
     st.session_state.app_config = load_config()
@@ -71,7 +64,7 @@ VOICE_MAP_EDGE = {
     "🇷🇺 俄语": [("ru-RU-DmitryNeural", "Dmitry (俄/男)"), ("ru-RU-SvetlanaNeural", "Svetlana (俄/女)")],
 }
 
-# 2. SiliconFlow CosyVoice2 (已验证可用)
+# 2. SiliconFlow CosyVoice2
 VOICE_MAP_SF = {
     "男声 - Benjamin (英伦风)": "FunAudioLLM/CosyVoice2-0.5B:benjamin", 
     "男声 - Alex (沉稳)": "FunAudioLLM/CosyVoice2-0.5B:alex",
@@ -118,7 +111,6 @@ async def get_audio_bytes_mixed(text, engine_type, voice_id, rate_str, lang_choi
         if not api_key: return None, "请先输入 API Key"
         client = OpenAI(api_key=api_key, base_url="https://api.siliconflow.cn/v1")
         
-        # 自动解析模型ID (默认锁定 V2)
         model_id = "FunAudioLLM/CosyVoice2-0.5B"
         if ":" in voice_id: model_id = voice_id.split(":")[0]
 
@@ -180,7 +172,7 @@ def silicon_translate_text(text, api_key, model_id, system_prompt):
 
 # ================= 5. 界面 UI =================
 
-st.title("🦋 跟读助手 Pro (V10.6 净化版)")
+st.title("🦋 跟读助手 Pro (V10.10 安全版)")
 
 if 'vocab_book' not in st.session_state: st.session_state.vocab_book = load_vocab()
 if 'current_text' not in st.session_state: st.session_state.current_text = ""
@@ -193,11 +185,13 @@ with st.sidebar:
     local_ip = get_local_ip()
     if local_ip != "127.0.0.1": st.caption(f"🏠 局域网: http://{local_ip}:8501")
 
-    # Key
+    # Key (每次刷新都重置为空，除非 Session 有值)
     default_key = st.session_state.app_config.get("api_key", "")
     api_input = st.text_input("SiliconFlow Key", value=default_key, type="password")
+    
+    # 仅更新内存中的 Session，不保存到文件
     if api_input != st.session_state.app_config.get("api_key"):
-        st.session_state.app_config["api_key"] = api_input; save_config(st.session_state.app_config)
+        st.session_state.app_config["api_key"] = api_input
 
     st.divider()
     tts_engine = st.radio("🔊 语音引擎", ["Edge (本地推荐)", "SiliconFlow (云端/付费)", "Google (云端保底)"], index=0)
