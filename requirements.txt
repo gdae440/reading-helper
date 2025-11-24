@@ -3,3 +3,4 @@ openai
 edge-tts
 genanki
 Pillow
+gTTS

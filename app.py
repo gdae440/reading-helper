@@ -11,6 +11,7 @@ from datetime import datetime
 from PIL import Image
 import genanki
 import socket
+from gtts import gTTS # 🔥 新增：谷歌语音库
 
 # ================= 1. 环境与配置管理 =================
 
@@ -18,7 +19,7 @@ for key in ["all_proxy", "http_proxy", "https_proxy"]:
     if key in os.environ: del os.environ[key]
 os.environ["no_proxy"] = "localhost,127.0.0.1,::1"
 
-st.set_page_config(page_title="跟读助手 Pro (V9.4)", layout="wide", page_icon="🦋")
+st.set_page_config(page_title="跟读助手 Pro (双引擎版)", layout="wide", page_icon="🦋")
 
 VOCAB_FILE = "my_vocab.json"
 CONFIG_FILE = "config.json"
@@ -81,6 +82,7 @@ def compress_image(image):
     image.save(buffered, format="JPEG", quality=85)
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
+# 声音映射表 (微软)
 VOICE_MAP = {
     "🇬🇧 英语 (English)": [("en-GB-RyanNeural", "Ryan (英)"), ("en-US-ChristopherNeural", "Chris (美)")],
     "🇫🇷 法语 (Français)": [("fr-FR-HenriNeural", "Henri (法)"), ("fr-FR-DeniseNeural", "Denise (法)")],
@@ -88,6 +90,16 @@ VOICE_MAP = {
     "🇪🇸 西班牙语 (Español)": [("es-ES-AlvaroNeural", "Alvaro (西)"), ("es-ES-ElviraNeural", "Elvira (西)")],
     "🇷🇺 俄语 (Русский)": [("ru-RU-DmitryNeural", "Dmitry (俄)"), ("ru-RU-SvetlanaNeural", "Svetlana (俄)")],
     "🇯🇵 日语 (日本語)": [("ja-JP-KeitaNeural", "Keita (日)"), ("ja-JP-NanamiNeural", "Nanami (日)")]
+}
+
+# 谷歌语音代码映射 (备用)
+GTTS_LANG_MAP = {
+    "🇬🇧 英语 (English)": "en",
+    "🇫🇷 法语 (Français)": "fr",
+    "🇩🇪 德语 (Deutsch)": "de",
+    "🇪🇸 西班牙语 (Español)": "es",
+    "🇷🇺 俄语 (Русский)": "ru",
+    "🇯🇵 日语 (日本語)": "ja"
 }
 
 def get_default_voice_for_lang(lang_name):
@@ -122,8 +134,18 @@ async def create_anki_package(selected_items):
         voice = get_default_voice_for_lang(lang)
         audio_filename = f"audio_{random.randint(1000,9999)}_{idx}.mp3"
         try:
+            # Anki 打包时也尝试双引擎
             communicate = edge_tts.Communicate(item['word'], voice)
             await communicate.save(audio_filename)
+        except:
+            try:
+                # 备用谷歌
+                g_lang = GTTS_LANG_MAP.get(lang, "en")
+                tts = gTTS(text=item['word'], lang=g_lang)
+                tts.save(audio_filename)
+            except: pass # 如果都失败则跳过
+
+        if os.path.exists(audio_filename):
             media_files.append(audio_filename)
             note = genanki.Note(
                 model=my_model,
@@ -133,7 +155,6 @@ async def create_anki_package(selected_items):
                     f"[sound:{audio_filename}]"
                 ])
             deck.add_note(note)
-        except: pass
         progress_bar.progress((idx + 1) / len(selected_items))
 
     output_package = genanki.Package(deck)
@@ -148,18 +169,28 @@ async def create_anki_package(selected_items):
     progress_bar.empty()
     return final_bytes
 
-# 🔥 核心修改：改用内存流，不再存文件，更稳定，并增加错误返回
-async def get_audio_bytes_memory(text, voice, rate_str):
+# 🔥🔥🔥 核心修改：双引擎音频生成 🔥🔥🔥
+async def get_audio_bytes_memory(text, voice, rate_str, lang_choice):
+    # 1. 优先尝试微软 Edge TTS (高质量)
     try:
         communicate = edge_tts.Communicate(text, voice, rate=rate_str)
-        # 使用内存 buffer
         mp3_fp = io.BytesIO()
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 mp3_fp.write(chunk["data"])
         return mp3_fp.getvalue(), None
-    except Exception as e:
-        return None, str(e)
+    except Exception as e_edge:
+        # 2. 如果失败，自动降级到 Google TTS (高可用)
+        print(f"EdgeTTS Failed ({e_edge}), switching to Google TTS...")
+        try:
+            g_lang = GTTS_LANG_MAP.get(lang_choice, "en")
+            # Google 不支持调整语速，只能按默认速度
+            tts = gTTS(text=text, lang=g_lang)
+            mp3_fp = io.BytesIO()
+            tts.write_to_fp(mp3_fp)
+            return mp3_fp.getvalue(), f"注意：微软语音服务繁忙，已自动切换至 Google 引擎 (暂不支持倍速)。"
+        except Exception as e_google:
+            return None, f"所有语音引擎均失败: {e_edge} | {e_google}"
 
 def silicon_ocr_multilang(image, api_key, model_id):
     client = OpenAI(api_key=api_key, base_url="https://api.siliconflow.cn/v1")
@@ -201,7 +232,7 @@ def silicon_translate_text(text, api_key, model_id, system_prompt):
 
 # ================= 5. 界面 UI =================
 
-st.title("🦋 跟读助手 Pro (V9.4)")
+st.title("🦋 跟读助手 Pro (Cloud Stable)")
 
 if 'vocab_book' not in st.session_state: st.session_state.vocab_book = load_vocab()
 if 'current_text' not in st.session_state: st.session_state.current_text = ""
@@ -227,7 +258,6 @@ with st.sidebar:
         ocr_model_input = st.text_input("OCR", value=st.session_state.app_config.get("ocr_model", "Qwen/Qwen2.5-VL-72B-Instruct"))
         trans_prompt_input = st.text_area("翻译提示词", value=st.session_state.app_config.get("trans_prompt", ""), height=80)
         
-        # 实时保存配置
         for k, v in [("chat_model", chat_model_input), ("ocr_model", ocr_model_input), ("trans_prompt", trans_prompt_input)]:
             if v != st.session_state.app_config.get(k):
                 st.session_state.app_config[k] = v; save_config(st.session_state.app_config)
@@ -270,14 +300,15 @@ with col1:
         with c_tts:
             if st.button(f"▶️ 播放语音 ({rate_str})", type="primary", use_container_width=True):
                 with st.spinner("合成语音中..."):
-                    # 🔥 调用新的内存函数，并捕获错误
-                    audio_bytes, audio_err = asyncio.run(get_audio_bytes_memory(final_text, voice_id, rate_str))
+                    # 🔥 传入 lang_choice 以便备用引擎使用
+                    audio_bytes, msg = asyncio.run(get_audio_bytes_memory(final_text, voice_id, rate_str, lang_choice))
                     
                     if audio_bytes:
                         st.session_state.audio_cache = audio_bytes
-                        st.rerun() # 强制刷新以加载音频
+                        if msg: st.toast(msg, icon="⚠️") # 提示用户切换了引擎
+                        st.rerun() 
                     else:
-                        st.error(f"语音合成失败: {audio_err}")
+                        st.error(f"语音合成失败: {msg}")
         
         if st.session_state.audio_cache:
             st.audio(st.session_state.audio_cache, format='audio/mpeg')
@@ -340,8 +371,8 @@ with col2:
                     st.markdown(f"**{item['word']}**")
                     if item.get('ipa'): st.caption(f"[{item['ipa']}]")
                     if st.button("🔊", key=f"p_{item['word']}_{d}_{idx}"):
-                        # 🔥 单词播放也改用内存模式
-                        adata, _ = asyncio.run(get_audio_bytes_memory(item['word'], voice_id, "+0%"))
+                        # 🔥 单词播放也使用双引擎
+                        adata, _ = asyncio.run(get_audio_bytes_memory(item['word'], voice_id, "+0%", lang_choice))
                         if adata: st.session_state.temp_word_audio[item['word']] = adata; st.rerun()
                 with c_ph:
                     st.markdown(f"🇨🇳 {item.get('zh','')}")
