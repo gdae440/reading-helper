@@ -2,6 +2,8 @@ Pillow
 edge-tts
 gTTS
 genanki
+gtts
 openai
 streamlit
 streamlit-option-menu
+watchdog
