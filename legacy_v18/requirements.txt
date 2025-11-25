@@ -1,0 +1,12 @@
+Pillow
+edge-tts
+fastapi
+genanki
+gtts
+httpx
+openai
+python-multipart
+streamlit
+streamlit-option-menu
+uvicorn
+watchdog
