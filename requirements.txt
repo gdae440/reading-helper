@@ -1,6 +1,7 @@
-streamlit
-openai
-edge-tts
-genanki
 Pillow
+edge-tts
 gTTS
+genanki
+openai
+streamlit
+streamlit-option-menu
