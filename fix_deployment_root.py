@@ -1,3 +1,12 @@
+import os
+
+BACKEND_FILE = "backend.py"
+
+print("🔧 正在修正后端入口，使其默认显示网页界面...")
+
+# 这是一个完整的、修正后的 backend.py
+# 包含了所有功能 (TTS, OCR, 翻译, Anki) + 正确的静态文件托管逻辑
+backend_code = """
 import asyncio
 import json
 import os
@@ -102,7 +111,7 @@ async def ai_api_call_async(type, api_key, content=None, image_bytes=None, chat_
                 res.raise_for_status()
                 return res.json()['choices'][0]['message']['content'], None
             elif type == "lookup" and content:
-                prompt = f"""Dictionary API. User input: "{content}". Return JSON: {{ "lang": "...", "ipa": "...", "zh": "...", "ru": "..." }} (lang example: "🇬🇧 英语", "🇷🇺 俄语")"""
+                prompt = f\"\"\"Dictionary API. User input: "{content}". Return JSON: {{ "lang": "...", "ipa": "...", "zh": "...", "ru": "..." }} (lang example: "🇬🇧 英语", "🇷🇺 俄语")\"\"\"
                 payload = {"model": chat_model, "messages": [{"role": "user", "content": prompt}], "response_format": {"type": "json_object"}}
                 res = await client.post("/chat/completions", headers=headers, json=payload, timeout=30.0)
                 res.raise_for_status()
@@ -110,7 +119,7 @@ async def ai_api_call_async(type, api_key, content=None, image_bytes=None, chat_
             elif type == "trans" and content:
                 res = await client.post("/chat/completions", headers=headers, json={
                     "model": chat_model,
-                    "messages": [{"role": "user", "content": f"Translate the following text to Chinese (keep it natural and concise):\n\n{content}"}]
+                    "messages": [{"role": "user", "content": f"Translate the following text to Chinese (keep it natural and concise):\\n\\n{content}"}]
                 }, timeout=30.0)
                 res.raise_for_status()
                 return res.json()['choices'][0]['message']['content'], None
@@ -281,3 +290,11 @@ async def serve_spa(full_path: str):
     if os.path.exists("frontend/dist/index.html"):
         return FileResponse("frontend/dist/index.html")
     return {"message": "Frontend not built"}
+"""
+
+with open(BACKEND_FILE, "w", encoding="utf-8") as f:
+    f.write(backend_code.strip())
+    print("✅ 后端入口已修复：访问 http://localhost:8000 现在会直接显示网页！")
+
+print("-" * 40)
+print("👉 请务必重启 uvicorn (backend) 才能生效。")
