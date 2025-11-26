@@ -335,6 +335,12 @@ with st.sidebar:
         "🇫🇷 法语": {"default": "fr-FR-HenriNeural", "voices": {"🇫🇷 Henri": "fr-FR-HenriNeural", "🇫🇷 Denise": "fr-FR-DeniseNeural"}},
         "🇩🇪 德语": {"default": "de-DE-ConradNeural", "voices": {"🇩🇪 Conrad": "de-DE-ConradNeural"}}
     }
+    VOICE_MAP_SF = {
+        "男声 - Benjamin (英伦风)": "benjamin",
+        "男声 - Alex (沉稳)": "alex",
+        "女声 - Anna (新闻)": "anna",
+        "女声 - Bella (温柔)": "bella"
+    }
     
     # 渲染语言选择器
     lang_list = list(lang_map.keys())
@@ -396,10 +402,14 @@ with st.sidebar:
     )
 
     if st.session_state.cfg["engine"] == "SiliconFlow (CosyVoice2)":
-        st.session_state.cfg["silicon_voice_id"] = st.text_input(
-            "Voice ID / Speaker Name",
-            value=st.session_state.cfg.get("silicon_voice_id", "alex")
+        voice_names_sf = list(VOICE_MAP_SF.keys())
+        selected_voice_name_sf = st.selectbox(
+            "Voice",
+            voice_names_sf,
+            index=voice_names_sf.index(st.session_state.cfg.get("silicon_voice_name", voice_names_sf[1])) # Default to Alex
         )
+        st.session_state.cfg["silicon_voice_name"] = selected_voice_name_sf
+        st.session_state.cfg["silicon_voice_id"] = VOICE_MAP_SF[selected_voice_name_sf]
 
 # ================= 6. 主页面逻辑 =================
 
@@ -566,7 +576,7 @@ elif page == "设置":
     )
 
     # OCR Model Selection
-    ocr_models = ["Qwen/Qwen2-VL-72B-Instruct"]
+    ocr_models = ["Qwen/Qwen2.5-VL-72B-Instruct"]
     current_ocr_model = st.session_state.cfg.get("ocr_model", ocr_models[0])
     try:
         ocr_default_index = ocr_models.index(current_ocr_model)
