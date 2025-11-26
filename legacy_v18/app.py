@@ -204,6 +204,10 @@ def api_call(task_type, content, cfg):
 
 async def get_audio_bytes_mixed(text, engine_type, voice_id, speed_int, cfg):
     """TTS 核心生成, 带回退机制"""
+    # Debugging prints
+    print(f"DEBUG: Config Key present: {bool(st.session_state.cfg.get('silicon_key'))}")
+    print(f"DEBUG: Engine selected: {engine_type}")
+
     if not text.strip():
         return None, "❌ Text cannot be empty."
 
