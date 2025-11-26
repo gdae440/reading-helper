@@ -469,7 +469,7 @@ if page == "学习主页":
             
             # 查词专用播放器 (不可见，仅自动播放)
             if st.session_state.lookup_audio:
-                st.audio(st.session_state.lookup_audio, format="audio/mp3", autoplay=True, key=f"lookup_player_{st.session_state.lookup_audio_ts}")
+                st.audio(st.session_state.lookup_audio, format="audio/mp3", autoplay=True)
 
 elif page == "单词本":
     st.subheader(f"📓 生词本 ({len(st.session_state.vocab)})")
@@ -500,7 +500,7 @@ elif page == "单词本":
             
     # 复用查词播放器
     if st.session_state.lookup_audio:
-        st.audio(st.session_state.lookup_audio, format="audio/mp3", autoplay=True, key=f"vocab_player_{st.session_state.lookup_audio_ts}")
+        st.audio(st.session_state.lookup_audio, format="audio/mp3", autoplay=True)
 
 elif page == "设置":
     st.subheader("⚙️ 模型与接口配置")
