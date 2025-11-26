@@ -19,8 +19,8 @@ import random
 def load_config():
     return {
         "api_key": "",
-        "engine": "Edge (推荐)",
-        "voice_role": "en-GB-RyanNeural",
+        "engine": "Google", # 默认改为 Google
+        "voice_role": "en",
         "speed": 0,
         "learn_lang": "🇬🇧 英语",
         "chat_model": "deepseek-ai/DeepSeek-V3",
@@ -72,12 +72,14 @@ if 'main_text' not in st.session_state: st.session_state.main_text = ""
 if 'trans_text' not in st.session_state: st.session_state.trans_text = ""
 if 'audio_data' not in st.session_state: st.session_state.audio_data = None
 if 'last_lookup' not in st.session_state: st.session_state.last_lookup = None
-# 新增：专门用于查词发音的状态，防止刷新丢失
 if 'lookup_audio' not in st.session_state: st.session_state.lookup_audio = None 
+# 专门用于生词本播放的缓存 { "word": bytes }
+if 'vocab_audio_cache' not in st.session_state: st.session_state.vocab_audio_cache = {}
 
 # ================= 3. 核心逻辑 =================
 
 def get_api_client(cfg):
+    # 这里的逻辑是：如果有 generic_api_key 就用它，否则用 silicon key
     key = cfg.get("generic_api_key") if cfg.get("generic_api_key") else cfg.get("api_key")
     base_url = cfg.get("generic_base_url") if cfg.get("generic_base_url") else "https://api.siliconflow.cn/v1"
     if not key: return None, "未配置 API Key"
@@ -128,17 +130,70 @@ async def get_audio_bytes_mixed(text, engine_type, voice_id, speed_int, cfg):
         except Exception as e: return None, f"SF Error: {e}"
     elif "Google" in engine_type:
         try:
+            # Google TTS 语言代码映射
             lang_map = {"🇬🇧 英语": "en", "🇫🇷 法语": "fr", "🇩🇪 德语": "de", "🇷🇺 俄语": "ru"}
             lang_code = lang_map.get(cfg["learn_lang"], "en")
+            # 简单的逻辑：如果 voice_id 看起来像语言代码，就用它
+            if len(voice_id) == 2: lang_code = voice_id
+            
             tts = gTTS(text=text, lang=lang_code)
             mp3_fp = io.BytesIO(); tts.write_to_fp(mp3_fp)
             return mp3_fp.getvalue(), None
         except Exception as e: return None, f"Google Error: {e}"
     return None, "Unknown Engine"
 
-# ================= 4. UI 渲染 =================
+# ================= 4. Anki 导出逻辑 =================
+async def create_anki_package_streamlit(selected_items, cfg):
+    deck = genanki.Deck(random.randrange(1<<30, 1<<31), '跟读助手生词本')
+    model = genanki.Model(random.randrange(1<<30, 1<<31), 'Simple Model', 
+        fields=[{'name': 'Question'}, {'name': 'Answer'}, {'name': 'Audio'}],
+        templates=[{'name': 'Card 1', 'qfmt': '{{Question}}<br>{{Audio}}', 'afmt': '{{FrontSide}}<hr id="answer">{{Answer}}'}])
+    
+    media_files = []
+    temp_files = []
+    
+    # 进度条
+    progress_bar = st.progress(0, text="正在生成 Anki 包...")
+    
+    for i, item in enumerate(selected_items):
+        progress_bar.progress((i + 1) / len(selected_items), text=f"处理单词: {item['word']}")
+        # 默认用 Edge 生成发音，比较快
+        # 根据 item 的语言猜测发音人，或者默认用英语
+        v_role = "en-US-AriaNeural" 
+        # 简单的语言检测
+        if "ru" in str(item) or "俄" in str(item): v_role = "ru-RU-DmitryNeural"
+        elif "fr" in str(item) or "法" in str(item): v_role = "fr-FR-HenriNeural"
+        
+        aud, _ = await get_audio_bytes_mixed(item['word'], "Edge (推荐)", v_role, 0, cfg)
+        
+        fname = ""
+        if aud:
+            fname = f"anki_{random.randint(1000,9999)}_{i}.mp3"
+            with open(fname, "wb") as f: f.write(aud)
+            media_files.append(fname)
+            temp_files.append(fname)
+        
+        deck.add_note(genanki.Note(model=model, fields=[
+            f"{item['word']} <br> <small style='color:grey'>{item.get('ipa','')}</small>",
+            f"🇨🇳 {item.get('zh','')}<br>🇷🇺 {item.get('ru','')}",
+            f"[sound:{fname}]" if fname else ""
+        ]))
+    
+    pkg = genanki.Package(deck); pkg.media_files = media_files
+    
+    out_io = io.BytesIO()
+    pkg.write_to_file(out_io)
+    
+    # 清理
+    for f in temp_files:
+        if os.path.exists(f): os.remove(f)
+    
+    progress_bar.empty()
+    out_io.seek(0)
+    return out_io
 
-# CSS 升级：更干净的边框，移除复杂的装饰，增加间距
+# ================= 5. UI 渲染 =================
+
 st.markdown("""
 <style>
     .stButton > button { width: 100%; border-radius: 6px; height: 2.5rem; }
@@ -152,8 +207,6 @@ st.markdown("""
     @media (prefers-color-scheme: dark) {
         div.lookup-card { background-color: #1e1e1e; border-color: #333; }
     }
-    h1, h2, h3 { font-weight: 600; }
-    .small-font { font-size: 12px; color: #666; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -165,12 +218,9 @@ with st.sidebar:
         styles={"nav-link": {"font-size": "14px", "text-align": "left", "margin":"0px"}})
     
     st.divider()
-    
-    # 语音配置直接放侧边栏，方便随时调
     st.markdown("#### 🔊 语音控制")
     
     lang_opts = ["🇬🇧 英语", "🇫🇷 法语", "🇩🇪 德语", "🇷🇺 俄语"]
-    # 保持之前选中的语言
     curr_lang_idx = 0
     if st.session_state.cfg["learn_lang"] in lang_opts:
         curr_lang_idx = lang_opts.index(st.session_state.cfg["learn_lang"])
@@ -178,22 +228,20 @@ with st.sidebar:
     new_lang = st.selectbox("目标语言", lang_opts, index=curr_lang_idx)
     if new_lang != st.session_state.cfg["learn_lang"]:
         st.session_state.cfg["learn_lang"] = new_lang
-        # 语言变了，重置一下发音人
         if "英语" in new_lang: st.session_state.cfg["voice_role"] = "en-GB-RyanNeural"
         elif "法语" in new_lang: st.session_state.cfg["voice_role"] = "fr-FR-HenriNeural"
         elif "德语" in new_lang: st.session_state.cfg["voice_role"] = "de-DE-ConradNeural"
         elif "俄语" in new_lang: st.session_state.cfg["voice_role"] = "ru-RU-DmitryNeural"
         st.rerun()
 
-    eng_opts = ["Edge (推荐)", "SiliconFlow", "Google"]
+    # 修复：调整引擎顺序 Google -> Edge -> SiliconFlow
+    eng_opts = ["Google", "Edge (推荐)", "SiliconFlow"]
     curr_eng_idx = 0
     if st.session_state.cfg["engine"] in eng_opts:
         curr_eng_idx = eng_opts.index(st.session_state.cfg["engine"])
     st.session_state.cfg["engine"] = st.selectbox("语音引擎", eng_opts, index=curr_eng_idx)
     
-    # 根据引擎显示不同的音色选项
     if "Edge" in st.session_state.cfg["engine"]:
-        # 简单的音色映射
         voice_map = {
             "🇬🇧 英语": {"Ryan (英/男)": "en-GB-RyanNeural", "Aria (美/女)": "en-US-AriaNeural"},
             "🇫🇷 法语": {"Henri (法/男)": "fr-FR-HenriNeural", "Denise (法/女)": "fr-FR-DeniseNeural"},
@@ -203,12 +251,9 @@ with st.sidebar:
         current_voices = voice_map.get(st.session_state.cfg["learn_lang"], {})
         voice_names = list(current_voices.keys())
         if voice_names:
-            # 尝试找到当前音色对应的名字
             curr_v_name = voice_names[0]
             for name, code in current_voices.items():
-                if code == st.session_state.cfg["voice_role"]:
-                    curr_v_name = name
-                    break
+                if code == st.session_state.cfg["voice_role"]: curr_v_name = name; break
             selected_v_name = st.selectbox("选择音色", voice_names, index=voice_names.index(curr_v_name) if curr_v_name in voice_names else 0)
             st.session_state.cfg["voice_role"] = current_voices[selected_v_name]
             
@@ -221,10 +266,12 @@ with st.sidebar:
         sf_names = list(sf_voices.keys())
         curr_sf = sf_names[0]
         for name, code in sf_voices.items():
-            if code == st.session_state.cfg["voice_role"]:
-                curr_sf = name
+            if code == st.session_state.cfg["voice_role"]: curr_sf = name
         sel_sf = st.selectbox("选择音色", sf_names, index=sf_names.index(curr_sf) if curr_sf in sf_names else 0)
         st.session_state.cfg["voice_role"] = sf_voices[sel_sf]
+    
+    elif "Google" in st.session_state.cfg["engine"]:
+        st.session_state.cfg["voice_role"] = "en" # 默认占位，实际由 api_call 内部分配
 
     st.session_state.cfg["speed"] = st.slider("语速调节", -50, 50, st.session_state.cfg["speed"], step=10)
 
@@ -234,19 +281,21 @@ with st.sidebar:
 if selected == "设置":
     st.subheader("全局设置")
     
-    # 使用 tabs 整理布局
     tab1, tab2 = st.tabs(["🔑 API 配置", "🤖 模型参数"])
     
     with tab1:
-        st.info("推荐优先使用备用 API，支持自定义 OpenAI 格式接口。")
+        # 修复：调整顺序，SiliconFlow 在上，其他 API 在下
+        st.session_state.cfg["api_key"] = st.text_input("SiliconFlow Key (用于 AI 语音)", value=st.session_state.cfg["api_key"], type="password")
+        st.caption("推荐使用 SiliconFlow Key 以获得最佳体验。")
+        
+        st.divider()
+        st.markdown("##### 其他/备用 API (可选)")
+        st.info("如果填写了这里，查词和 OCR 将优先使用此配置。")
         c1, c2 = st.columns(2)
         with c1:
-            st.session_state.cfg["generic_base_url"] = st.text_input("API Base URL", value=st.session_state.cfg.get("generic_base_url", "https://api.siliconflow.cn/v1"))
+            st.session_state.cfg["generic_base_url"] = st.text_input("Base URL", value=st.session_state.cfg.get("generic_base_url", "https://api.siliconflow.cn/v1"))
         with c2:
             st.session_state.cfg["generic_api_key"] = st.text_input("API Key", value=st.session_state.cfg.get("generic_api_key", ""), type="password")
-            
-        with st.expander("旧版 SiliconFlow 原生配置 (可选)"):
-            st.session_state.cfg["api_key"] = st.text_input("SiliconFlow Key", value=st.session_state.cfg["api_key"], type="password")
 
     with tab2:
         c3, c4 = st.columns(2)
@@ -284,7 +333,6 @@ elif selected == "学习主页":
             if st.session_state.trans_text:
                 st.info(f"**译文：**\n\n{st.session_state.trans_text}")
 
-            # 操作栏
             c_act1, c_act2 = st.columns(2)
             with c_act1:
                 if st.button("▶️ 朗读全文", type="primary", use_container_width=True):
@@ -314,7 +362,6 @@ elif selected == "学习主页":
 
     with col_r:
         st.caption("智能查词")
-        # 使用 form 避免每次输入字符都刷新
         with st.form("lookup_form"):
             q_w = st.text_input("单词", placeholder="输入单词...")
             submitted = st.form_submit_button("查询", use_container_width=True)
@@ -325,9 +372,7 @@ elif selected == "学习主页":
                 if info:
                     info["word"] = q_w
                     st.session_state.last_lookup = info
-                    st.session_state.lookup_audio = None # 重置发音
-                    
-                    # 自动保存
+                    st.session_state.lookup_audio = None
                     exists = any(i['word'] == q_w for i in st.session_state.vocab)
                     if not exists:
                         st.session_state.vocab.insert(0, {"word": q_w, "lang": st.session_state.cfg["learn_lang"], "date": datetime.now().strftime("%Y-%m-%d"), **info})
@@ -338,7 +383,6 @@ elif selected == "学习主页":
 
         if st.session_state.last_lookup:
             ll = st.session_state.last_lookup
-            # 简洁的卡片展示
             st.markdown(f"""
             <div class="lookup-card">
                 <h3 style="margin:0">{ll['word']}</h3>
@@ -348,30 +392,78 @@ elif selected == "学习主页":
             </div>
             """, unsafe_allow_html=True)
             
-            # 发音按钮
             if st.button("🔊 朗读单词", use_container_width=True):
                 ab, _ = asyncio.run(get_audio_bytes_mixed(ll['word'], "Edge (推荐)", "en-US-AriaNeural", 0, st.session_state.cfg))
                 if ab:
                     st.session_state.lookup_audio = ab
-                    st.rerun() # 关键：刷新以显示音频播放器
+                    st.rerun()
             
-            # 稳定的音频播放器
             if st.session_state.lookup_audio:
                 st.audio(st.session_state.lookup_audio, format="audio/mpeg", autoplay=True)
 
 elif selected == "单词本":
+    # 修复: 添加 Anki 导出功能 + 多选框
     st.subheader(f"我的生词本 ({len(st.session_state.vocab)})")
+    
     if not st.session_state.vocab:
         st.info("空空如也。在右侧查词自动添加。")
     else:
+        # 全选/操作栏
+        col_sel, col_exp = st.columns([3, 1])
+        with col_exp:
+            if st.button("📦 导出 Anki 包"):
+                # 找出所有选中的
+                # 注意：Streamlit 的 checkbox 在循环中需要 unique key
+                # 这里我们先扫描一遍状态
+                selected_items = []
+                for i, item in enumerate(st.session_state.vocab):
+                    if st.session_state.get(f"chk_{i}", False):
+                        selected_items.append(item)
+                
+                if not selected_items:
+                    st.warning("请先勾选单词！")
+                else:
+                    ankibytes = asyncio.run(create_anki_package_streamlit(selected_items, st.session_state.cfg))
+                    st.download_button(
+                        label="⬇️ 点击下载 .apkg",
+                        data=ankibytes,
+                        file_name="anki_export.apkg",
+                        mime="application/octet-stream"
+                    )
+
+        st.divider()
+        
+        # 单词列表循环
         for i, item in enumerate(st.session_state.vocab):
-            with st.expander(f"{item['word']}", expanded=False):
-                st.write(f"[{item.get('ipa','')}]")
-                st.write(f"🇨🇳 {item.get('zh','')}")
-                st.write(f"🇷🇺 {item.get('ru','')}")
-                c_del, c_play = st.columns([1, 4])
-                with c_del:
-                    if st.button("🗑️ 删除", key=f"d_{i}"):
-                        st.session_state.vocab.pop(i)
-                        save_vocab(st.session_state.vocab)
+            c_chk, c_word, c_act = st.columns([0.5, 3, 1])
+            with c_chk:
+                st.checkbox("", key=f"chk_{i}")
+            
+            with c_word:
+                with st.expander(f"**{item['word']}** [{item.get('ipa','')}]"):
+                    st.write(f"🇨🇳 {item.get('zh','')}")
+                    st.write(f"🇷🇺 {item.get('ru','')}")
+            
+            with c_act:
+                # 修复: 播放按钮逻辑
+                if st.button("🔊", key=f"play_{i}"):
+                    # 使用 Edge 播放，根据内容大概猜一下语言
+                    v_role = "en-US-AriaNeural"
+                    if "ru" in str(item) or "俄" in str(item): v_role = "ru-RU-DmitryNeural"
+                    elif "fr" in str(item) or "法" in str(item): v_role = "fr-FR-HenriNeural"
+                    
+                    ab, _ = asyncio.run(get_audio_bytes_mixed(item['word'], "Edge (推荐)", v_role, 0, st.session_state.cfg))
+                    if ab:
+                        st.session_state.vocab_audio_cache[item['word']] = ab
                         st.rerun()
+                        
+                if st.button("🗑️", key=f"del_{i}"):
+                    st.session_state.vocab.pop(i)
+                    save_vocab(st.session_state.vocab)
+                    st.rerun()
+            
+            # 检查是否有该单词的缓存音频需要播放
+            if item['word'] in st.session_state.vocab_audio_cache:
+                st.audio(st.session_state.vocab_audio_cache[item['word']], format="audio/mpeg", autoplay=True)
+                # 播放一次后清除，避免刷新一直播? 或者保留? 保留比较好，除非点别的
+                # del st.session_state.vocab_audio_cache[item['word']]
