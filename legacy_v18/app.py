@@ -346,9 +346,16 @@ with st.sidebar:
     
     st.session_state.cfg["speed"] = st.slider("语速", -50, 50, st.session_state.cfg["speed"], 10)
 
+    engine_options = ["Edge TTS", "OpenAI TTS", "gTTS"]
+    current_engine = st.session_state.cfg.get("engine", "Edge TTS")
+    try:
+        default_index = engine_options.index(current_engine)
+    except ValueError:
+        default_index = 0 # Default to "Edge TTS" if the old value is not found
+
     st.session_state.cfg["engine"] = st.selectbox("语音引擎",
-        ["Edge TTS", "OpenAI TTS", "gTTS"],
-        index=["Edge TTS", "OpenAI TTS", "gTTS"].index(st.session_state.cfg.get("engine", "Edge TTS"))
+        engine_options,
+        index=default_index
     )
 
 # ================= 6. 主页面逻辑 =================
