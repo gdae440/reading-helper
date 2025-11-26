@@ -69,10 +69,61 @@ st.set_page_config(page_title="跟读助手 Pro", layout="wide", page_icon="📘
 
 st.markdown("""
 <style>
-    .stApp { background-color: #f5f5f7; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
-    .stButton > button { border-radius: 10px; border: none; font-weight: 500; transition: 0.2s; }
-    .stButton > button:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
-    div.lookup-card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); margin-bottom: 15px; border: 1px solid #e5e5ea; }
+    :root {
+        --bg-color: #f5f5f7;
+        --text-color: #000000;
+        --card-bg-color: #ffffff;
+        --card-border-color: #e5e5ea;
+        --primary-color: #007aff;
+        --secondary-text-color: #666;
+        --shadow-color: rgba(0,0,0,0.1);
+        --shadow-color-light: rgba(0,0,0,0.05);
+    }
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --bg-color: #1c1c1e;
+            --text-color: #ffffff;
+            --card-bg-color: #2c2c2e;
+            --card-border-color: #3a3a3c;
+            --primary-color: #0a84ff;
+            --secondary-text-color: #8e8e93;
+            --shadow-color: rgba(255,255,255,0.1);
+            --shadow-color-light: rgba(255,255,255,0.05);
+        }
+    }
+    .stApp {
+        background-color: var(--bg-color);
+        color: var(--text-color);
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    .stButton > button {
+        border-radius: 10px;
+        border: none;
+        font-weight: 500;
+        transition: 0.2s;
+    }
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px var(--shadow-color);
+    }
+    div.lookup-card {
+        background: var(--card-bg-color);
+        border-radius: 12px;
+        padding: 20px;
+        box-shadow: 0 2px 10px var(--shadow-color-light);
+        margin-bottom: 15px;
+        border: 1px solid var(--card-border-color);
+        color: var(--text-color);
+    }
+    .lookup-card h3 {
+        color: var(--primary-color) !important;
+    }
+    .lookup-card div {
+        color: var(--text-color) !important;
+    }
+    .lookup-card div[style*="color:#666"] {
+        color: var(--secondary-text-color) !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -147,17 +198,71 @@ def api_call(task_type, content, cfg):
     return None, "Unknown"
 
 async def get_audio_bytes_mixed(text, engine_type, voice_id, speed_int, cfg):
-    """TTS 核心生成"""
-    if not text: return None, "Text empty"
-    if "Edge" in engine_type:
+    """TTS 核心生成, 带回退机制"""
+    if not text.strip():
+        return None, "❌ Text cannot be empty."
+
+    # 1. Primary Engine: Edge TTS
+    async def try_edge_tts():
         try:
             rate_str = f"{speed_int:+d}%"
             communicate = edge_tts.Communicate(text, voice_id, rate=rate_str)
             mp3_fp = io.BytesIO()
+            audio_received = False
             async for chunk in communicate.stream():
-                if chunk["type"] == "audio": mp3_fp.write(chunk["data"])
+                if chunk["type"] == "audio":
+                    mp3_fp.write(chunk["data"])
+                    audio_received = True
+            if not audio_received:
+                return None, "Edge Error: No audio was received."
             return mp3_fp.getvalue(), None
-        except Exception as e: return None, f"Edge Error: {e}"
+        except Exception as e:
+            return None, f"Edge Error: {e}"
+
+    # 2. Fallback/Alternative: gTTS
+    def try_gtts():
+        try:
+            lang_map = { "🇬🇧 英语": "en", "🇷🇺 俄语": "ru", "🇫🇷 法语": "fr", "🇩🇪 德语": "de" }
+            lang_code = lang_map.get(cfg.get("learn_lang", "🇬🇧 英语"), "en")
+
+            mp3_fp = io.BytesIO()
+            tts = gTTS(text, lang=lang_code)
+            tts.write_to_fp(mp3_fp)
+            return mp3_fp.getvalue(), None
+        except Exception as e:
+            return None, f"gTTS Error: {e}"
+
+    # 3. Alternative: OpenAI TTS
+    def try_openai_tts():
+        try:
+            client, err = get_api_client(cfg)
+            if not client: return None, err
+
+            openai_voice = "nova" # Default female voice
+            if "Ryan" in voice_id or "Dmitry" in voice_id or "Henri" in voice_id or "Conrad" in voice_id:
+                openai_voice = "echo" # Switch to a male voice
+
+            speed_float = max(0.25, min(4.0, 1.0 + (speed_int / 100.0)))
+
+            response = client.audio.speech.create(model="tts-1", voice=openai_voice, speed=speed_float, input=text)
+            return response.content, None
+        except Exception as e:
+            return None, f"OpenAI TTS Error: {e}"
+
+    # Main Logic
+    if "Edge TTS" in engine_type:
+        audio, err = await try_edge_tts()
+        if audio:
+            return audio, None
+        st.warning("⚠️ Edge TTS failed, falling back to gTTS...")
+        return try_gtts()
+
+    elif "OpenAI TTS" in engine_type:
+        return try_openai_tts()
+
+    elif "gTTS" in engine_type:
+        return try_gtts()
+
     return None, "Unsupported Engine"
 
 async def create_anki_package(selected_items, cfg):
@@ -241,6 +346,11 @@ with st.sidebar:
     
     st.session_state.cfg["speed"] = st.slider("语速", -50, 50, st.session_state.cfg["speed"], 10)
 
+    st.session_state.cfg["engine"] = st.selectbox("语音引擎",
+        ["Edge TTS", "OpenAI TTS", "gTTS"],
+        index=["Edge TTS", "OpenAI TTS", "gTTS"].index(st.session_state.cfg.get("engine", "Edge TTS"))
+    )
+
 # ================= 6. 主页面逻辑 =================
 
 if page == "学习主页":
@@ -259,7 +369,7 @@ if page == "学习主页":
                     with st.spinner("生成语音..."):
                         ab, err = asyncio.run(get_audio_bytes_mixed(
                             st.session_state.main_text,
-                            "Edge",
+                            st.session_state.cfg["engine"],
                             st.session_state.cfg["voice_role"],
                             st.session_state.cfg["speed"],
                             st.session_state.cfg
@@ -304,7 +414,7 @@ if page == "学习主页":
                             v_role = "en-US-AriaNeural"
                             if re.search(r'[\u0400-\u04FF]', q): v_role = "ru-RU-DmitryNeural"
                             
-                            ab, _ = asyncio.run(get_audio_bytes_mixed(q, "Edge", v_role, 0, st.session_state.cfg))
+                            ab, _ = asyncio.run(get_audio_bytes_mixed(q, st.session_state.cfg["engine"], v_role, 0, st.session_state.cfg))
                             st.session_state.lookup_audio = ab
                             st.session_state.lookup_audio_ts = time.time() # 强制刷新
                             
@@ -317,25 +427,38 @@ if page == "学习主页":
 
         if st.session_state.last_lookup:
             info = st.session_state.last_lookup
+
+            # Custom container to simulate the card with the button inside
+            st.markdown('<div class="lookup-card">', unsafe_allow_html=True)
+
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.markdown(f"""
+                    <h3 style="margin:0;">{info.get('word', '')}</h3>
+                    <div style="color:var(--secondary-text-color); font-family:monospace;">[{info.get('ipa', '')}]</div>
+                """, unsafe_allow_html=True)
+
+            with col2:
+                # This button is now inline with the word
+                if st.button("🔊", key=f"play_lookup_{info.get('word')}"):
+                    v_role = "en-US-AriaNeural"
+                    if re.search(r'[\u0400-\u04FF]', info['word']):
+                        v_role = "ru-RU-DmitryNeural"
+                    ab, err = asyncio.run(get_audio_bytes_mixed(info['word'], st.session_state.cfg["engine"], v_role, 0, st.session_state.cfg))
+                    if ab:
+                        st.session_state.lookup_audio = ab
+                        st.session_state.lookup_audio_ts = time.time()
+                        st.rerun()
+                    else:
+                        st.error(err)
+
             st.markdown(f"""
-            <div class="lookup-card">
-                <h3 style="color:#007aff;margin:0">{info.get('word','')}</h3>
-                <div style="color:#666;font-family:monospace">[{info.get('ipa','')}]</div>
-                <hr style="margin:10px 0; border:none; border-top:1px solid #eee;">
+                <hr style="margin:10px 0; border:none; border-top:1px solid var(--card-border-color);">
                 <div><b>🇨🇳</b> {info.get('zh','')}</div>
                 <div style="margin-top:5px"><b>🇷🇺</b> {info.get('ru','')}</div>
-            </div>
             """, unsafe_allow_html=True)
-            
-            # 查词播放按钮
-            if st.button("🔊 播放", use_container_width=True):
-                 # 点击重新生成/播放逻辑
-                 v_role = "en-US-AriaNeural"
-                 if re.search(r'[\u0400-\u04FF]', info['word']): v_role = "ru-RU-DmitryNeural"
-                 ab, _ = asyncio.run(get_audio_bytes_mixed(info['word'], "Edge", v_role, 0, st.session_state.cfg))
-                 st.session_state.lookup_audio = ab
-                 st.session_state.lookup_audio_ts = time.time()
-                 st.rerun()
+
+            st.markdown('</div>', unsafe_allow_html=True)
             
             # 查词专用播放器 (不可见，仅自动播放)
             if st.session_state.lookup_audio:
@@ -359,7 +482,7 @@ elif page == "单词本":
         if c4.button("🔊", key=f"v_play_{i}"):
             v_role = "en-US-AriaNeural"
             if re.search(r'[\u0400-\u04FF]', item['word']): v_role = "ru-RU-DmitryNeural"
-            ab, _ = asyncio.run(get_audio_bytes_mixed(item['word'], "Edge", v_role, 0, st.session_state.cfg))
+            ab, _ = asyncio.run(get_audio_bytes_mixed(item['word'], st.session_state.cfg["engine"], v_role, 0, st.session_state.cfg))
             st.session_state.lookup_audio = ab
             st.session_state.lookup_audio_ts = time.time()
             st.rerun()
@@ -373,5 +496,26 @@ elif page == "单词本":
         st.audio(st.session_state.lookup_audio, format="audio/mp3", autoplay=True, key=f"vocab_player_{st.session_state.lookup_audio_ts}")
 
 elif page == "设置":
+    st.subheader("⚙️ 模型与接口配置")
     st.text_input("API Key", value=st.session_state.cfg["api_key"], type="password", key="key_input", on_change=lambda: st.session_state.cfg.update({"api_key": st.session_state.key_input}))
     st.text_input("Base URL", value=st.session_state.cfg["generic_base_url"], key="url_input", on_change=lambda: st.session_state.cfg.update({"generic_base_url": st.session_state.url_input}))
+
+    st.divider()
+
+    # LLM Model Selection
+    chat_models = ["deepseek-ai/DeepSeek-V3"]
+    selected_chat_model = st.selectbox(
+        "LLM (Chat) Model",
+        chat_models,
+        index=chat_models.index(st.session_state.cfg.get("chat_model", chat_models[0]))
+    )
+    st.session_state.cfg["chat_model"] = selected_chat_model
+
+    # OCR Model Selection
+    ocr_models = ["Qwen/Qwen2-VL-72B-Instruct"]
+    selected_ocr_model = st.selectbox(
+        "OCR (Vision) Model",
+        ocr_models,
+        index=ocr_models.index(st.session_state.cfg.get("ocr_model", ocr_models[0]))
+    )
+    st.session_state.cfg["ocr_model"] = selected_ocr_model
