@@ -346,10 +346,23 @@ with st.sidebar:
     
     st.session_state.cfg["speed"] = st.slider("语速", -50, 50, st.session_state.cfg["speed"], 10)
 
-    st.session_state.cfg["engine"] = st.selectbox("语音引擎",
-        ["Edge TTS", "OpenAI TTS", "gTTS"],
-        index=["Edge TTS", "OpenAI TTS", "gTTS"].index(st.session_state.cfg.get("engine", "Edge TTS"))
+    # === 修复开始 ===
+    engine_options = ["Edge TTS", "OpenAI TTS", "gTTS"]
+    current_engine = st.session_state.cfg.get("engine", "Edge TTS")
+    
+    # 尝试查找旧设置，找不到就默认用第 0 个 (Edge TTS)
+    try:
+        default_index = engine_options.index(current_engine)
+    except ValueError:
+        default_index = 0 
+
+    st.session_state.cfg["engine"] = st.sidebar.selectbox(
+        "Voice Engine", 
+        engine_options, 
+        index=default_index
     )
+    # === 修复结束 ===
+
 
 # ================= 6. 主页面逻辑 =================
 
@@ -513,9 +526,16 @@ elif page == "设置":
 
     # OCR Model Selection
     ocr_models = ["Qwen/Qwen2-VL-72B-Instruct"]
-    selected_ocr_model = st.selectbox(
-        "OCR (Vision) Model",
+    # === OCR 修复代码 ===
+    # 尝试查找旧模型，找不到就默认用第 0 个
+    try:
+        ocr_index = ocr_models.index(st.session_state.cfg.get("ocr_model", ocr_models[0]))
+    except ValueError:
+        ocr_index = 0
+    
+    st.session_state.cfg["ocr_model"] = st.sidebar.selectbox(
+        "OCR Model",
         ocr_models,
-        index=ocr_models.index(st.session_state.cfg.get("ocr_model", ocr_models[0]))
+        index=ocr_index
     )
-    st.session_state.cfg["ocr_model"] = selected_ocr_model
+    # === 修复结束 ===
