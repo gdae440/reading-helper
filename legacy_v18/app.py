@@ -8,396 +8,572 @@ import os
 import io
 import base64
 import re
+import random
 from datetime import datetime
 from PIL import Image
 import genanki
 from streamlit_option_menu import option_menu
-import random
 
-# ================= 1. 核心配置 =================
+# ================= 1. 核心配置与工具函数 =================
 
-def load_config():
-    return {
-        "api_key": "",
-        "engine": "Google",
-        "voice_role": "en",
+VOCAB_FILE = "my_vocab.json"
+
+def load_vocab():
+    """加载生词本"""
+    # 兼容不同运行目录
+    paths = ["my_vocab.json", "../my_vocab.json"]
+    for p in paths:
+        if os.path.exists(p):
+            try:
+                return json.load(open(p, "r", encoding="utf-8"))
+            except:
+                pass
+    return []
+
+def save_vocab(vocab_list):
+    """保存生词本"""
+    try:
+        with open(VOCAB_FILE, "w", encoding="utf-8") as f:
+            json.dump(vocab_list, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.error(f"保存失败: {e}")
+
+def get_smart_filename(text):
+    """生成智能文件名"""
+    if not text: return f"audio_{datetime.now().strftime('%H%M%S')}.mp3"
+    snippet = text[:20]
+    safe_name = re.sub(r'[^\w\s\u4e00-\u9fa5-]', '', snippet).strip()
+    safe_name = re.sub(r'[\s]+', '_', safe_name)
+    return f"{safe_name}.mp3" if safe_name else "audio.mp3"
+
+# ================= 2. 页面初始化与样式 =================
+
+st.set_page_config(page_title="跟读助手 Pro (Legacy)", layout="wide", page_icon="📘")
+
+# Apple Design 风格 CSS
+st.markdown("""
+<style>
+    /* 全局背景与字体 */
+    .stApp {
+        background-color: #f5f5f7;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    /* 按钮优化 */
+    .stButton > button {
+        border-radius: 10px;
+        border: none;
+        font-weight: 500;
+        transition: all 0.2s;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }
+    .stButton > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    /* 主按钮蓝色 */
+    button[kind="primary"] {
+        background-color: #007aff !important;
+        color: white !important;
+    }
+    /* 侧边栏样式 */
+    section[data-testid="stSidebar"] {
+        background-color: #ffffff;
+        border-right: 1px solid #e5e5ea;
+    }
+    /* 查词卡片 */
+    div.lookup-card {
+        background: white;
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 15px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        border: 1px solid #e5e5ea;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ================= 3. 状态管理 (Session State) =================
+
+if 'cfg' not in st.session_state:
+    st.session_state.cfg = {
+        "api_key": os.getenv("SILICON_KEY", ""),
+        "engine": "Edge (推荐)",
+        "voice_role": "en-US-AriaNeural",
         "speed": 0,
         "learn_lang": "🇬🇧 英语",
         "chat_model": "deepseek-ai/DeepSeek-V3",
         "ocr_model": "Qwen/Qwen2.5-VL-72B-Instruct",
-        "generic_api_key": "",
         "generic_base_url": "https://api.siliconflow.cn/v1"
     }
-
-def load_vocab():
-    VOCAB_FILE = "../my_vocab.json" 
-    if not os.path.exists(VOCAB_FILE):
-        VOCAB_FILE = "my_vocab.json"
-    if os.path.exists(VOCAB_FILE):
-        try: return json.load(open(VOCAB_FILE, "r", encoding="utf-8"))
-        except: return []
-    return []
-
-def save_vocab(vocab_list):
-    VOCAB_FILE = "../my_vocab.json"
-    try:
-        with open(VOCAB_FILE, "w", encoding="utf-8") as f:
-            json.dump(vocab_list, f, ensure_ascii=False, indent=2)
-    except:
-        try:
-            with open("my_vocab.json", "w", encoding="utf-8") as f:
-                json.dump(vocab_list, f, ensure_ascii=False, indent=2)
-        except: pass
-
-def get_smart_filename(text):
-    if not text: return f"read_aloud_{datetime.now().strftime('%H%M%S')}.mp3"
-    snippet = text[:50]
-    safe_name = re.sub(r'[^\w\s\u4e00-\u9fa5-]', '', snippet)
-    safe_name = re.sub(r'[\s]+', '_', safe_name).strip()
-    if not safe_name: return f"read_aloud_{datetime.now().strftime('%H%M%S')}.mp3"
-    return f"{safe_name}.mp3"
-
-# ================= 2. 状态管理 =================
-
-st.set_page_config(page_title="跟读助手 Pro", layout="wide", page_icon="📘")
-
-if 'cfg' not in st.session_state:
-    init_cfg = load_config()
-    env_key = os.getenv("SILICON_KEY")
-    if env_key: init_cfg["api_key"] = env_key
-    st.session_state.cfg = init_cfg
 
 if 'vocab' not in st.session_state: st.session_state.vocab = load_vocab()
 if 'main_text' not in st.session_state: st.session_state.main_text = ""
 if 'trans_text' not in st.session_state: st.session_state.trans_text = ""
 if 'audio_data' not in st.session_state: st.session_state.audio_data = None
 if 'last_lookup' not in st.session_state: st.session_state.last_lookup = None
-if 'lookup_audio' not in st.session_state: st.session_state.lookup_audio = None 
+# 音频缓存池，避免重绘丢失
 if 'vocab_audio_cache' not in st.session_state: st.session_state.vocab_audio_cache = {}
-# 新增：记录当前正在播放的单词ID，用于触发autoplay
 if 'playing_word_idx' not in st.session_state: st.session_state.playing_word_idx = -1
 
-# ================= 3. 核心逻辑 =================
+# ================= 4. 核心 API 逻辑 =================
 
 def get_api_client(cfg):
-    key = cfg.get("generic_api_key") if cfg.get("generic_api_key") else cfg.get("api_key")
-    base_url = cfg.get("generic_base_url") if cfg.get("generic_base_url") else "https://api.siliconflow.cn/v1"
-    if not key: return None, "未配置 API Key"
+    """获取 OpenAI 兼容客户端"""
+    key = cfg.get("api_key")
+    base_url = cfg.get("generic_base_url", "https://api.siliconflow.cn/v1")
+    if not key: return None, "❌ 未配置 API Key"
+    # 容错处理
+    if not base_url.endswith("/v1"): 
+        if base_url.endswith("/"): base_url += "v1"
+        else: base_url += "/v1"
+        
     return OpenAI(api_key=key, base_url=base_url), None
 
-def api_call(type, content, cfg):
+def api_call(task_type, content, cfg):
+    """统一 API 调用入口"""
     client, err = get_api_client(cfg)
     if not client: return None, err
 
-    chat_model = cfg.get("chat_model", "deepseek-ai/DeepSeek-V3")
-    ocr_model = cfg.get("ocr_model", "Qwen/Qwen2.5-VL-72B-Instruct")
-
     try:
-        if type == "ocr":
+        if task_type == "ocr":
+            # 图片转 base64
             buffered = io.BytesIO()
             content.save(buffered, format="JPEG", quality=85)
             b64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-            res = client.chat.completions.create(model=ocr_model, messages=[{"role": "user", "content": [{"type": "text", "text": "OCR text only. Keep formatting."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}])
+            res = client.chat.completions.create(
+                model=cfg["ocr_model"],
+                messages=[{
+                    "role": "user", 
+                    "content": [
+                        {"type": "text", "text": "Recognize all text in this image. Output plain text only."}, 
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                    ]
+                }]
+            )
             return res.choices[0].message.content, None
-        elif type == "lookup":
-            prompt = """Dictionary API. User input: "{content}". Return JSON: {{ "detected_lang": "...", "ipa": "...", "zh": "...", "ru": "..." }} (Concise)"""
-            res = client.chat.completions.create(model=chat_model, messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"})
+            
+        elif task_type == "lookup":
+            # 强制 JSON 模式
+            prompt = f"""Explain the word "{content}" concisely. Return strictly valid JSON format:
+            {{ "detected_lang": "en", "ipa": "/.../", "zh": "Chinese definition", "ru": "Russian definition" }}"""
+            res = client.chat.completions.create(
+                model=cfg["chat_model"],
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"}
+            )
             return json.loads(res.choices[0].message.content), None
-        elif type == "trans":
-            res = client.chat.completions.create(model=chat_model, messages=[{"role": "user", "content": f"Translate to Chinese (Natural & Concise):\\n\\n{content}"}])
+            
+        elif task_type == "trans":
+            res = client.chat.completions.create(
+                model=cfg["chat_model"],
+                messages=[{"role": "user", "content": f"Translate the following text to natural Chinese:\n\n{content}"}]
+            )
             return res.choices[0].message.content, None
+            
     except Exception as e:
         return None, f"API Error: {str(e)}"
     return None, "Unknown Error"
 
 async def get_audio_bytes_mixed(text, engine_type, voice_id, speed_int, cfg):
+    """多引擎 TTS 核心逻辑"""
+    if not text: return None, "No text"
+    
+    # 1. Edge TTS (最强免费)
     if "Edge" in engine_type:
         try:
-            communicate = edge_tts.Communicate(text, voice_id, rate=f"{speed_int:+d}%")
+            # 速度转换: -50 -> -50%, +50 -> +50%
+            rate_str = f"{speed_int:+d}%"
+            communicate = edge_tts.Communicate(text, voice_id, rate=rate_str)
             mp3_fp = io.BytesIO()
             async for chunk in communicate.stream():
-                if chunk["type"] == "audio": mp3_fp.write(chunk["data"])
+                if chunk["type"] == "audio":
+                    mp3_fp.write(chunk["data"])
             return mp3_fp.getvalue(), None
-        except Exception as e: return None, f"Edge Error: {e}"
+        except Exception as e:
+            return None, f"Edge TTS Error: {e}"
+
+    # 2. SiliconFlow (CosyVoice)
     elif "SiliconFlow" in engine_type:
         client, err = get_api_client(cfg)
         if not client: return None, err
-        model_id = voice_id.split(":")[0] if ":" in voice_id else "FunAudioLLM/CosyVoice2-0.5B"
+        model_id = "FunAudioLLM/CosyVoice2-0.5B" # 固定默认模型
+        # 提取实际 voice 代码 (如果含有 model 前缀则剥离)
+        real_voice = voice_id.split(":")[-1] if ":" in voice_id else voice_id 
+        
         try:
+            # 速度转换: 0 -> 1.0, 10 -> 1.1
             sf_speed = 1.0 + (speed_int / 100.0)
-            response = client.audio.speech.create(model=model_id, voice=voice_id, input=text, speed=sf_speed)
+            response = client.audio.speech.create(
+                model=model_id,
+                voice=model_id + ":" + real_voice, # SF 格式要求
+                input=text,
+                speed=sf_speed
+            )
             return response.content, None
-        except Exception as e: return None, f"SF Error: {e}"
+        except Exception as e:
+            return None, f"SiliconFlow TTS Error: {e}"
+
+    # 3. Google (gTTS)
     elif "Google" in engine_type:
         try:
+            # 语言代码映射
             lang_map = {"🇬🇧 英语": "en", "🇫🇷 法语": "fr", "🇩🇪 德语": "de", "🇷🇺 俄语": "ru"}
             lang_code = lang_map.get(cfg["learn_lang"], "en")
-            if len(voice_id) == 2: lang_code = voice_id
             tts = gTTS(text=text, lang=lang_code)
-            mp3_fp = io.BytesIO(); tts.write_to_fp(mp3_fp)
+            mp3_fp = io.BytesIO()
+            tts.write_to_fp(mp3_fp)
             return mp3_fp.getvalue(), None
-        except Exception as e: return None, f"Google Error: {e}"
+        except Exception as e:
+            return None, f"Google TTS Error: {e}"
+            
     return None, "Unknown Engine"
 
-# ================= 4. Anki 导出逻辑 =================
-async def create_anki_package_streamlit(selected_items, cfg):
+async def create_anki_package(selected_items, cfg):
+    """生成 Anki 包"""
     deck = genanki.Deck(random.randrange(1<<30, 1<<31), '跟读助手生词本')
-    model = genanki.Model(random.randrange(1<<30, 1<<31), 'Simple Model', 
+    model = genanki.Model(
+        random.randrange(1<<30, 1<<31),
+        'Simple Model',
         fields=[{'name': 'Question'}, {'name': 'Answer'}, {'name': 'Audio'}],
-        templates=[{'name': 'Card 1', 'qfmt': '{{Question}}<br>{{Audio}}', 'afmt': '{{FrontSide}}<hr id="answer">{{Answer}}'}])
-    media_files = []
-    temp_files = []
-    progress_bar = st.progress(0, text="正在生成 Anki 包...")
+        templates=[{
+            'name': 'Card 1',
+            'qfmt': '<div style="font-size:24px;text-align:center">{{Question}}</div><br>{{Audio}}',
+            'afmt': '{{FrontSide}}<hr id="answer"><div style="text-align:center">{{Answer}}</div>',
+        }]
+    )
     
-    for i, item in enumerate(selected_items):
-        progress_bar.progress((i + 1) / len(selected_items), text=f"处理单词: {item['word']}")
-        v_role = "en-US-AriaNeural" 
-        if "ru" in str(item) or "俄" in str(item): v_role = "ru-RU-DmitryNeural"
-        elif "fr" in str(item) or "法" in str(item): v_role = "fr-FR-HenriNeural"
+    media_files = []
+    temp_files = [] # 用于后续清理
+    
+    my_bar = st.progress(0, text="准备生成 Anki 包...")
+    
+    for idx, item in enumerate(selected_items):
+        my_bar.progress((idx + 1) / len(selected_items), text=f"处理: {item['word']}")
         
-        aud, _ = await get_audio_bytes_mixed(item['word'], "Edge (推荐)", v_role, 0, cfg)
-        fname = ""
-        if aud:
-            fname = f"anki_{random.randint(1000,9999)}_{i}.mp3"
-            with open(fname, "wb") as f: f.write(aud)
+        # 自动匹配发音角色
+        v_role = "en-US-AriaNeural"
+        if "ru" in str(item): v_role = "ru-RU-DmitryNeural"
+        elif "fr" in str(item): v_role = "fr-FR-HenriNeural"
+        
+        # 生成音频
+        aud_data, _ = await get_audio_bytes_mixed(item['word'], "Edge (推荐)", v_role, 0, cfg)
+        
+        audio_field = ""
+        if aud_data:
+            fname = f"anki_{random.randint(1000,9999)}_{idx}.mp3"
+            with open(fname, "wb") as f:
+                f.write(aud_data)
             media_files.append(fname)
             temp_files.append(fname)
-        
-        deck.add_note(genanki.Note(model=model, fields=[
-            f"{item['word']} <br> <small style='color:grey'>{item.get('ipa','')}</small>",
-            f"🇨🇳 {item.get('zh','')}<br>🇷🇺 {item.get('ru','')}",
-            f"[sound:{fname}]" if fname else ""
-        ]))
+            audio_field = f"[sound:{fname}]"
+            
+        note = genanki.Note(
+            model=model,
+            fields=[
+                f"{item['word']} <br> <small style='color:grey'>{item.get('ipa','')}</small>",
+                f"🇨🇳 {item.get('zh','')}<br>🇷🇺 {item.get('ru','')}",
+                audio_field
+            ]
+        )
+        deck.add_note(note)
+
+    pkg = genanki.Package(deck)
+    pkg.media_files = media_files
     
-    pkg = genanki.Package(deck); pkg.media_files = media_files
     out_io = io.BytesIO()
     pkg.write_to_file(out_io)
+    out_io.seek(0)
+    
+    # 清理临时文件
     for f in temp_files:
         if os.path.exists(f): os.remove(f)
-    progress_bar.empty()
-    out_io.seek(0)
+        
+    my_bar.empty()
     return out_io
 
-# ================= 5. UI 渲染 =================
+# ================= 5. 侧边栏设置 =================
 
-st.markdown("""
-<style>
-    .stButton > button { width: 100%; border-radius: 6px; height: 2.5rem; }
-    div[data-testid="stVerticalBlock"] > div > button[kind="primary"] {
-        background-color: #007AFF; color: white; border: none;
-    }
-    div.lookup-card {
-        border: 1px solid #e5e5e5; border-radius: 8px; padding: 20px;
-        background-color: white; margin-bottom: 15px;
-    }
-    @media (prefers-color-scheme: dark) {
-        div.lookup-card { background-color: #1e1e1e; border-color: #333; }
-    }
-    /* 优化列表布局 */
-    div.row-widget.stCheckbox { display: flex; justify-content: center; align-items: center; height: 100%; }
-</style>
-""", unsafe_allow_html=True)
-
-# --- 侧边栏 ---
 with st.sidebar:
-    st.markdown("### 跟读助手 Pro")
-    selected = option_menu(None, ["学习主页", "单词本", "设置"], 
-        icons=['book', 'bookmark', 'sliders'], menu_icon="cast", default_index=0,
-        styles={"nav-link": {"font-size": "14px", "text-align": "left", "margin":"0px"}})
+    st.title("📘 跟读助手 Pro")
+    
+    # 导航菜单
+    selected_page = option_menu(
+        menu_title=None,
+        options=["学习主页", "单词本", "高级设置"],
+        icons=['book', 'journal-bookmark', 'gear'],
+        default_index=0,
+        styles={"nav-link": {"font-size": "15px", "margin": "5px"}}
+    )
     
     st.divider()
-    st.markdown("#### 🔊 语音控制")
     
-    lang_opts = ["🇬🇧 英语", "🇫🇷 法语", "🇩🇪 德语", "🇷🇺 俄语"]
-    curr_lang_idx = 0
-    if st.session_state.cfg["learn_lang"] in lang_opts:
-        curr_lang_idx = lang_opts.index(st.session_state.cfg["learn_lang"])
-    
-    new_lang = st.selectbox("目标语言", lang_opts, index=curr_lang_idx)
-    if new_lang != st.session_state.cfg["learn_lang"]:
-        st.session_state.cfg["learn_lang"] = new_lang
-        if "英语" in new_lang: st.session_state.cfg["voice_role"] = "en-GB-RyanNeural"
-        elif "法语" in new_lang: st.session_state.cfg["voice_role"] = "fr-FR-HenriNeural"
-        elif "德语" in new_lang: st.session_state.cfg["voice_role"] = "de-DE-ConradNeural"
-        elif "俄语" in new_lang: st.session_state.cfg["voice_role"] = "ru-RU-DmitryNeural"
-        st.rerun()
+    # 语音设置卡片
+    with st.expander("🔊 语音与语言设置", expanded=True):
+        # 语言选择
+        lang_options = ["🇬🇧 英语", "🇫🇷 法语", "🇩🇪 德语", "🇷🇺 俄语"]
+        current_lang = st.session_state.cfg.get("learn_lang", "🇬🇧 英语")
+        # 防止 index out of range
+        idx = lang_options.index(current_lang) if current_lang in lang_options else 0
+        new_lang = st.selectbox("学习语言", lang_options, index=idx)
+        
+        if new_lang != current_lang:
+            st.session_state.cfg["learn_lang"] = new_lang
+            # 切换语言自动重置推荐人
+            defaults = {
+                "🇬🇧 英语": "en-US-AriaNeural",
+                "🇫🇷 法语": "fr-FR-HenriNeural", 
+                "🇩🇪 德语": "de-DE-ConradNeural",
+                "🇷🇺 俄语": "ru-RU-DmitryNeural"
+            }
+            st.session_state.cfg["voice_role"] = defaults.get(new_lang, "en-US-AriaNeural")
+            st.rerun()
 
-    eng_opts = ["Google", "Edge (推荐)", "SiliconFlow"]
-    curr_eng_idx = 0
-    if st.session_state.cfg["engine"] in eng_opts:
-        curr_eng_idx = eng_opts.index(st.session_state.cfg["engine"])
-    st.session_state.cfg["engine"] = st.selectbox("语音引擎", eng_opts, index=curr_eng_idx)
-    
-    if "Edge" in st.session_state.cfg["engine"]:
-        voice_map = {
-            "🇬🇧 英语": {"Ryan (英/男)": "en-GB-RyanNeural", "Aria (美/女)": "en-US-AriaNeural"},
-            "🇫🇷 法语": {"Henri (法/男)": "fr-FR-HenriNeural", "Denise (法/女)": "fr-FR-DeniseNeural"},
-            "🇩🇪 德语": {"Conrad (德/男)": "de-DE-ConradNeural", "Katja (德/女)": "de-DE-KatjaNeural"},
-            "🇷🇺 俄语": {"Dmitry (俄/男)": "ru-RU-DmitryNeural", "Svetlana (俄/女)": "ru-RU-SvetlanaNeural"},
-        }
-        current_voices = voice_map.get(st.session_state.cfg["learn_lang"], {})
-        voice_names = list(current_voices.keys())
-        if voice_names:
-            curr_v_name = voice_names[0]
-            for name, code in current_voices.items():
-                if code == st.session_state.cfg["voice_role"]: curr_v_name = name; break
-            selected_v_name = st.selectbox("选择音色", voice_names, index=voice_names.index(curr_v_name) if curr_v_name in voice_names else 0)
-            st.session_state.cfg["voice_role"] = current_voices[selected_v_name]
+        # 引擎选择
+        engine_opts = ["Edge (推荐)", "SiliconFlow", "Google"]
+        curr_engine = st.session_state.cfg.get("engine", "Edge (推荐)")
+        idx_e = engine_opts.index(curr_engine) if curr_engine in engine_opts else 0
+        new_engine = st.selectbox("TTS 引擎", engine_opts, index=idx_e)
+        st.session_state.cfg["engine"] = new_engine
+        
+        # 音色选择逻辑
+        if "Edge" in new_engine:
+            voice_map = {
+                "🇬🇧 英语": {"🇺🇸 Aria (女)": "en-US-AriaNeural", "🇬🇧 Ryan (男)": "en-GB-RyanNeural"},
+                "🇫🇷 法语": {"🇫🇷 Henri (男)": "fr-FR-HenriNeural", "🇫🇷 Denise (女)": "fr-FR-DeniseNeural"},
+                "🇩🇪 德语": {"🇩🇪 Conrad (男)": "de-DE-ConradNeural", "🇩🇪 Katja (女)": "de-DE-KatjaNeural"},
+                "🇷🇺 俄语": {"🇷🇺 Dmitry (男)": "ru-RU-DmitryNeural", "🇷🇺 Svetlana (女)": "ru-RU-SvetlanaNeural"},
+            }
+            avail_voices = voice_map.get(new_lang, {"Default": "en-US-AriaNeural"})
+            v_names = list(avail_voices.keys())
+            # 反查当前 voice 对应的 name
+            curr_role = st.session_state.cfg["voice_role"]
+            default_idx = 0
+            for i, (name, code) in enumerate(avail_voices.items()):
+                if code == curr_role: default_idx = i
             
-    elif "SiliconFlow" in st.session_state.cfg["engine"]:
-        sf_voices = {
-            "Benjamin (英/男)": "FunAudioLLM/CosyVoice2-0.5B:benjamin",
-            "Alex (美/男)": "FunAudioLLM/CosyVoice2-0.5B:alex",
-            "Bella (美/女)": "FunAudioLLM/CosyVoice2-0.5B:bella"
-        }
-        sf_names = list(sf_voices.keys())
-        curr_sf = sf_names[0]
-        for name, code in sf_voices.items():
-            if code == st.session_state.cfg["voice_role"]: curr_sf = name
-        sel_sf = st.selectbox("选择音色", sf_names, index=sf_names.index(curr_sf) if curr_sf in sf_names else 0)
-        st.session_state.cfg["voice_role"] = sf_voices[sel_sf]
-    elif "Google" in st.session_state.cfg["engine"]:
-        st.session_state.cfg["voice_role"] = "en"
+            sel_v = st.selectbox("选择发音人", v_names, index=default_idx)
+            st.session_state.cfg["voice_role"] = avail_voices[sel_v]
+            
+        elif "SiliconFlow" in new_engine:
+            sf_voices = {
+                "Benjamin (英/男)": "benjamin",
+                "Bella (美/女)": "bella",
+                "Alex (美/男)": "alex"
+            }
+            st.info("SiliconFlow 仅支持部分英语/中文音色")
+            sel_sf = st.selectbox("CosyVoice 音色", list(sf_voices.keys()))
+            st.session_state.cfg["voice_role"] = sf_voices[sel_sf]
 
-    st.session_state.cfg["speed"] = st.slider("语速调节", -50, 50, st.session_state.cfg["speed"], step=10)
+        st.session_state.cfg["speed"] = st.slider("语速 (Rate)", -50, 50, st.session_state.cfg["speed"], 10)
 
-# --- 主界面 ---
+# ================= 6. 主页面逻辑 =================
 
-if selected == "设置":
-    st.subheader("全局设置")
-    tab1, tab2 = st.tabs(["🔑 API 配置", "🤖 模型参数"])
-    with tab1:
-        st.session_state.cfg["api_key"] = st.text_input("SiliconFlow Key (用于 AI 语音)", value=st.session_state.cfg["api_key"], type="password")
-        st.divider()
-        st.markdown("##### 其他/备用 API (可选)")
+if selected_page == "高级设置":
+    st.subheader("🛠️ 系统设置")
+    
+    with st.container(border=True):
+        st.markdown("#### 🔑 API 密钥管理")
+        st.session_state.cfg["api_key"] = st.text_input(
+            "SiliconFlow API Key (用于 AI 翻译/查词/TTS)", 
+            value=st.session_state.cfg["api_key"], 
+            type="password",
+            help="从 cloud.siliconflow.cn 获取"
+        )
+        st.session_state.cfg["generic_base_url"] = st.text_input(
+            "Base URL", 
+            value=st.session_state.cfg["generic_base_url"]
+        )
+    
+    with st.container(border=True):
+        st.markdown("#### 🧠 模型配置")
         c1, c2 = st.columns(2)
         with c1:
-            st.session_state.cfg["generic_base_url"] = st.text_input("Base URL", value=st.session_state.cfg.get("generic_base_url", "https://api.siliconflow.cn/v1"))
+            st.session_state.cfg["chat_model"] = st.text_input("Chat 模型", value=st.session_state.cfg["chat_model"])
         with c2:
-            st.session_state.cfg["generic_api_key"] = st.text_input("API Key", value=st.session_state.cfg.get("generic_api_key", ""), type="password")
-    with tab2:
-        c3, c4 = st.columns(2)
-        with c3: st.session_state.cfg["chat_model"] = st.text_input("Chat 模型名称", value=st.session_state.cfg["chat_model"])
-        with c4: st.session_state.cfg["ocr_model"] = st.text_input("OCR 模型名称", value=st.session_state.cfg["ocr_model"])
+            st.session_state.cfg["ocr_model"] = st.text_input("OCR 模型", value=st.session_state.cfg["ocr_model"])
 
-elif selected == "学习主页":
-    col_l, col_r = st.columns([2, 1])
-    with col_l:
-        st.caption("阅读与朗读")
-        mode = st.radio("输入模式", ["文本", "OCR 拍照"], horizontal=True, label_visibility="collapsed")
-        if mode == "文本":
-            txt_input = st.text_area("内容输入", height=200, label_visibility="collapsed", placeholder="在此输入或粘贴文本...")
-            if st.button("确认内容", use_container_width=True):
-                st.session_state.main_text = txt_input; st.session_state.trans_text = ""; st.rerun()
-        else:
-            up = st.file_uploader("上传图片", type=['jpg','png'], label_visibility="collapsed")
-            if up and st.button("开始识别", use_container_width=True):
-                with st.spinner("AI 识别中..."):
-                    res, err = api_call("ocr", Image.open(up), st.session_state.cfg)
-                    if res: st.session_state.main_text = res; st.session_state.trans_text = ""; st.rerun()
-                    else: st.error(err)
-
+elif selected_page == "学习主页":
+    # 两栏布局：左侧输入，右侧查词
+    col_main, col_side = st.columns([2, 1])
+    
+    with col_main:
+        st.markdown("### 📝 阅读与朗读")
+        
+        # 输入方式切换
+        input_tab1, input_tab2 = st.tabs(["✏️ 文本输入", "📷 拍照识别 (OCR)"])
+        
+        with input_tab1:
+            txt = st.text_area("请输入文章", value=st.session_state.main_text, height=200, placeholder="Paste text here...")
+            if st.button("更新文本", key="btn_update_txt"):
+                st.session_state.main_text = txt
+                st.session_state.trans_text = "" # 清空旧翻译
+                st.rerun()
+                
+        with input_tab2:
+            uploaded_file = st.file_uploader("上传图片", type=['png', 'jpg', 'jpeg'])
+            if uploaded_file and st.button("开始 OCR 识别"):
+                with st.spinner("正在识别文字..."):
+                    res_text, err = api_call("ocr", Image.open(uploaded_file), st.session_state.cfg)
+                    if res_text:
+                        st.session_state.main_text = res_text
+                        st.session_state.trans_text = ""
+                        st.success("识别成功！")
+                        st.rerun()
+                    else:
+                        st.error(err)
+        
+        # 操作栏
         if st.session_state.main_text:
             st.markdown("---")
-            st.markdown(f"**原文内容：**\n\n{st.session_state.main_text}")
-            if st.session_state.trans_text: st.info(f"**译文：**\n\n{st.session_state.trans_text}")
-            c_act1, c_act2 = st.columns(2)
-            with c_act1:
+            c1, c2, c3 = st.columns([1, 1, 2])
+            with c1:
                 if st.button("▶️ 朗读全文", type="primary", use_container_width=True):
-                    with st.spinner("生成语音..."):
-                        ab, err = asyncio.run(get_audio_bytes_mixed(st.session_state.main_text, st.session_state.cfg["engine"], st.session_state.cfg["voice_role"], st.session_state.cfg["speed"], st.session_state.cfg))
-                        if ab: st.session_state.audio_data = ab; st.rerun()
-                        else: st.error(err)
-            with c_act2:
-                if st.button("📝 全文翻译", use_container_width=True):
-                    with st.spinner("翻译中..."):
-                        trans, err = api_call("trans", st.session_state.main_text, st.session_state.cfg)
-                        if trans: st.session_state.trans_text = trans; st.rerun()
-                        else: st.error(err)
+                    with st.spinner("正在合成语音..."):
+                        audio_data, err = asyncio.run(get_audio_bytes_mixed(
+                            st.session_state.main_text,
+                            st.session_state.cfg["engine"],
+                            st.session_state.cfg["voice_role"],
+                            st.session_state.cfg["speed"],
+                            st.session_state.cfg
+                        ))
+                        if audio_data:
+                            st.session_state.audio_data = audio_data
+                            st.rerun()
+                        else:
+                            st.error(f"合成失败: {err}")
             
-            # 🔥 修复：找回文章语音下载功能
-            if st.session_state.audio_data:
-                st.audio(st.session_state.audio_data, format='audio/mpeg')
-                fname = get_smart_filename(st.session_state.main_text)
-                st.download_button("⬇️ 下载音频", st.session_state.audio_data, file_name=fname, mime="audio/mpeg")
+            with c2:
+                if st.button("🌐 全文翻译", use_container_width=True):
+                    with st.spinner("AI 翻译中..."):
+                        trans, err = api_call("trans", st.session_state.main_text, st.session_state.cfg)
+                        if trans:
+                            st.session_state.trans_text = trans
+                            st.rerun()
+                        else:
+                            st.error(err)
 
-    with col_r:
-        st.caption("智能查词")
-        with st.form("lookup_form"):
-            q_w = st.text_input("单词", placeholder="输入单词...")
-            submitted = st.form_submit_button("查询", use_container_width=True)
-        if submitted and q_w:
-            with st.spinner("查询中..."):
-                info, err = api_call("lookup", q_w, st.session_state.cfg)
-                if info:
-                    info["word"] = q_w
-                    st.session_state.last_lookup = info; st.session_state.lookup_audio = None
-                    exists = any(i['word'] == q_w for i in st.session_state.vocab)
-                    if not exists:
-                        st.session_state.vocab.insert(0, {"word": q_w, "lang": st.session_state.cfg["learn_lang"], "date": datetime.now().strftime("%Y-%m-%d"), **info})
-                        save_vocab(st.session_state.vocab)
-                    st.rerun()
-                else: st.error(err)
+            # 结果展示区
+            if st.session_state.trans_text:
+                st.info(f"**参考译文：**\n\n{st.session_state.trans_text}")
+            
+            if st.session_state.audio_data:
+                st.audio(st.session_state.audio_data, format="audio/mp3")
+                # 下载按钮
+                b64_audio = base64.b64encode(st.session_state.audio_data).decode()
+                filename = get_smart_filename(st.session_state.main_text)
+                href = f'<a href="data:audio/mp3;base64,{b64_audio}" download="{filename}" style="text-decoration:none;">📥 点击下载音频</a>'
+                st.markdown(href, unsafe_allow_html=True)
+
+    with col_side:
+        st.markdown("### 🔍 智能查词")
+        with st.container(border=True):
+            q_word = st.text_input("查词", placeholder="输入单词...")
+            if st.button("查询 & 解析", use_container_width=True):
+                if q_word:
+                    with st.spinner("查询中..."):
+                        info, err = api_call("lookup", q_word, st.session_state.cfg)
+                        if info:
+                            info['word'] = q_word # 确保有 word 字段
+                            st.session_state.last_lookup = info
+                            # 自动生成发音
+                            ab, _ = asyncio.run(get_audio_bytes_mixed(q_word, "Edge (推荐)", "en-US-AriaNeural", 0, st.session_state.cfg))
+                            st.session_state.lookup_audio = ab
+                            
+                            # 自动加入生词本 (去重)
+                            if not any(w['word'] == q_word for w in st.session_state.vocab):
+                                new_item = {
+                                    "word": q_word,
+                                    "ipa": info.get("ipa", ""),
+                                    "zh": info.get("zh", ""),
+                                    "ru": info.get("ru", ""),
+                                    "date": datetime.now().strftime("%Y-%m-%d")
+                                }
+                                st.session_state.vocab.insert(0, new_item)
+                                save_vocab(st.session_state.vocab)
+                            st.rerun()
+                        else:
+                            st.error(err)
+
+        # 显示查词结果卡片
         if st.session_state.last_lookup:
-            ll = st.session_state.last_lookup
+            info = st.session_state.last_lookup
             st.markdown(f"""
             <div class="lookup-card">
-                <h3 style="margin:0">{ll['word']}</h3>
-                <div style="color:#666; margin-bottom:10px; font-family:monospace;">[{ll.get('ipa','--')}]</div>
-                <div style="margin-bottom:5px"><b>🇨🇳</b> {ll.get('zh','--')}</div>
-                <div><b>🇷🇺</b> {ll.get('ru','--')}</div>
+                <h3 style="color:#007aff; margin-bottom:0;">{info['word']}</h3>
+                <div style="color:#666; font-family:monospace; margin-bottom:10px;">{info.get('ipa', '')}</div>
+                <div style="margin-bottom:5px;"><b>🇨🇳 中文：</b>{info.get('zh', 'N/A')}</div>
+                <div><b>🇷🇺 俄语：</b>{info.get('ru', 'N/A')}</div>
             </div>
             """, unsafe_allow_html=True)
-            if st.button("🔊 朗读单词", use_container_width=True):
-                ab, _ = asyncio.run(get_audio_bytes_mixed(ll['word'], "Edge (推荐)", "en-US-AriaNeural", 0, st.session_state.cfg))
-                if ab: st.session_state.lookup_audio = ab; st.rerun()
+            
             if st.session_state.lookup_audio:
-                st.audio(st.session_state.lookup_audio, format="audio/mpeg", autoplay=True)
+                st.audio(st.session_state.lookup_audio, format="audio/mp3", autoplay=True)
 
-elif selected == "单词本":
-    st.subheader(f"我的生词本 ({len(st.session_state.vocab)})")
+elif selected_page == "单词本":
+    st.subheader(f"📓 我的生词本 ({len(st.session_state.vocab)})")
+    
     if not st.session_state.vocab:
-        st.info("空空如也。")
+        st.caption("暂无生词，快去阅读页面查词吧！")
     else:
-        col_sel, col_exp = st.columns([3, 1])
-        with col_exp:
-            # 🔥 修复: Anki 导出回归
-            if st.button("📦 导出 Anki 包"):
+        # 顶部工具栏
+        c_tool1, c_tool2 = st.columns([1, 4])
+        with c_tool1:
+            if st.button("📤 导出 Anki 包", type="primary"):
+                # 收集勾选的单词
                 selected_items = []
                 for i, item in enumerate(st.session_state.vocab):
-                    if st.session_state.get(f"chk_{i}", False): selected_items.append(item)
-                if not selected_items: st.warning("请先勾选单词！")
+                    if st.session_state.get(f"chk_{i}", False):
+                        selected_items.append(item)
+                
+                if not selected_items:
+                    st.warning("请先勾选至少一个单词！")
                 else:
-                    ankibytes = asyncio.run(create_anki_package_streamlit(selected_items, st.session_state.cfg))
-                    st.download_button("⬇️ 下载 .apkg", data=ankibytes, file_name="anki_export.apkg", mime="application/octet-stream")
-        
+                    # 异步生成
+                    anki_io = asyncio.run(create_anki_package(selected_items, st.session_state.cfg))
+                    st.download_button(
+                        label="⬇️ 点击下载 .apkg",
+                        data=anki_io,
+                        file_name=f"vocab_export_{datetime.now().strftime('%m%d')}.apkg",
+                        mime="application/octet-stream"
+                    )
+
         st.divider()
         
-        # 🔥 布局重构: Checkbox | Word | Trans | Play | Del
+        # 列表头
+        h1, h2, h3, h4, h5 = st.columns([0.5, 2, 3, 1, 1])
+        h1.markdown("选")
+        h2.markdown("单词")
+        h3.markdown("释义 (中/俄)")
+        h4.markdown("发音")
+        h5.markdown("操作")
+        
+        # 列表内容
         for i, item in enumerate(st.session_state.vocab):
-            c1, c2, c3, c4, c5 = st.columns([0.3, 1.5, 2.5, 0.5, 0.5])
+            c1, c2, c3, c4, c5 = st.columns([0.5, 2, 3, 1, 1])
             with c1: st.checkbox("", key=f"chk_{i}")
-            with c2: st.markdown(f"**{item['word']}** \n<span style='color:#666;font-size:0.8em'>[{item.get('ipa','')}]</span>", unsafe_allow_html=True)
-            with c3: st.write(f"{item.get('zh','')} / {item.get('ru','')}")
+            with c2: st.markdown(f"**{item['word']}**\n<br><span style='color:grey;font-size:12px'>{item.get('ipa','')}</span>", unsafe_allow_html=True)
+            with c3: st.markdown(f"🇨🇳 {item.get('zh','')}\n<br>🇷🇺 {item.get('ru','')}", unsafe_allow_html=True)
             
             with c4:
-                if st.button("🔊", key=f"btn_play_{i}"):
-                    v_role = "en-US-AriaNeural"
-                    # 简单猜测发音
-                    if "ru" in str(item) or "俄" in str(item): v_role = "ru-RU-DmitryNeural"
-                    elif "fr" in str(item) or "法" in str(item): v_role = "fr-FR-HenriNeural"
-                    ab, _ = asyncio.run(get_audio_bytes_mixed(item['word'], "Edge (推荐)", v_role, 0, st.session_state.cfg))
-                    if ab:
-                        st.session_state.playing_word_idx = i
-                        st.session_state.vocab_audio_cache[item['word']] = ab
+                # 播放逻辑：点击后将音频放入 SessionState 并刷新，依靠 autoplay 播放
+                if st.button("🔊", key=f"play_{i}"):
+                    # 简易策略：如果是俄语单词用俄语发音，否则默认英语
+                    # 这里简单判断：如果单词里有西里尔字母则为俄语
+                    is_ru = bool(re.search('[а-яА-Я]', item['word']))
+                    v_role = "ru-RU-DmitryNeural" if is_ru else "en-US-AriaNeural"
+                    
+                    audio_bytes, _ = asyncio.run(get_audio_bytes_mixed(item['word'], "Edge (推荐)", v_role, 0, st.session_state.cfg))
+                    if audio_bytes:
+                        st.session_state.vocab_audio_cache[item['word']] = audio_bytes
+                        st.session_state.playing_word_idx = i # 标记当前正在播放的索引
                         st.rerun()
-            
+
             with c5:
-                if st.button("🗑️", key=f"btn_del_{i}"):
+                if st.button("🗑️", key=f"del_{i}"):
                     st.session_state.vocab.pop(i)
                     save_vocab(st.session_state.vocab)
                     st.rerun()
             
-            # 播放器逻辑：如果是当前点击的单词，显示播放器
+            # 仅在当前行渲染不可见的音频播放器以触发 Autoplay
             if st.session_state.playing_word_idx == i and item['word'] in st.session_state.vocab_audio_cache:
-                st.audio(st.session_state.vocab_audio_cache[item['word']], format="audio/mpeg", autoplay=True)
+                st.audio(st.session_state.vocab_audio_cache[item['word']], format="audio/mp3", autoplay=True)
