@@ -10,6 +10,7 @@ import base64
 import re
 import random
 import time
+import traceback
 from datetime import datetime
 from PIL import Image
 import genanki
@@ -141,7 +142,11 @@ if 'cfg' not in st.session_state:
         "generic_base_url": "https://api.siliconflow.cn/v1"
     }
 
-if 'vocab' not in st.session_state: st.session_state.vocab = load_vocab()
+# Ensure vocab is always a list to prevent crashes
+if 'vocab' not in st.session_state:
+    st.session_state.vocab = load_vocab()
+if not isinstance(st.session_state.vocab, list):
+    st.session_state.vocab = []
 if 'main_text' not in st.session_state: st.session_state.main_text = ""
 if 'trans_text' not in st.session_state: st.session_state.trans_text = ""
 if 'audio_data' not in st.session_state: st.session_state.audio_data = None
@@ -249,6 +254,25 @@ async def get_audio_bytes_mixed(text, engine_type, voice_id, speed_int, cfg):
         except Exception as e:
             return None, f"OpenAI TTS Error: {e}"
 
+    def get_siliconflow_api_client(cfg):
+        key = cfg.get("silicon_key")
+        if not key: return None, "❌ SiliconFlow API Key not configured"
+        return OpenAI(api_key=key, base_url="https://api.siliconflow.cn/v1"), None
+
+    def try_siliconflow_tts():
+        try:
+            client, err = get_siliconflow_api_client(cfg)
+            if not client: return None, err
+
+            response = client.audio.speech.create(
+                model="FunAudioLLM/CosyVoice2-0.5B",
+                voice="cosyvoice2_speaker_0", # Default speaker
+                input=text
+            )
+            return response.content, None
+        except Exception as e:
+            return None, f"SiliconFlow TTS Error: {e}"
+
     # Main Logic
     if "Edge TTS" in engine_type:
         audio, err = await try_edge_tts()
@@ -259,6 +283,9 @@ async def get_audio_bytes_mixed(text, engine_type, voice_id, speed_int, cfg):
 
     elif "OpenAI TTS" in engine_type:
         return try_openai_tts()
+
+    elif "SiliconFlow" in engine_type:
+        return try_siliconflow_tts()
 
     elif "gTTS" in engine_type:
         return try_gtts()
@@ -333,7 +360,17 @@ with st.sidebar:
         
     # 渲染音色选择
     curr_voices_dict = lang_map[st.session_state.cfg["learn_lang"]]["voices"]
-    v_names = list(curr_voices_dict.keys())
+
+    # Sort v_names to prioritize GB and US voices as requested
+    def get_voice_sort_key(voice_name):
+        voice_code = curr_voices_dict.get(voice_name, "")
+        if "en-GB" in voice_code:
+            return 0
+        elif "en-US" in voice_code:
+            return 1
+        else:
+            return 2
+    v_names = sorted(list(curr_voices_dict.keys()), key=get_voice_sort_key)
     
     # 反查当前 voice name
     curr_v_code = st.session_state.cfg.get("voice_role")
@@ -346,7 +383,7 @@ with st.sidebar:
     
     st.session_state.cfg["speed"] = st.slider("语速", -50, 50, st.session_state.cfg["speed"], 10)
 
-    engine_options = ["Edge TTS", "OpenAI TTS", "gTTS"]
+    engine_options = ["Edge TTS", "OpenAI TTS", "gTTS", "SiliconFlow (CosyVoice2)"]
     current_engine = st.session_state.cfg.get("engine", "Edge TTS")
     try:
         default_index = engine_options.index(current_engine)
@@ -373,19 +410,25 @@ if page == "学习主页":
             col_ops = st.columns([1, 1, 2])
             with col_ops[0]:
                 if st.button("▶️ 朗读", type="primary", use_container_width=True):
-                    with st.spinner("生成语音..."):
-                        ab, err = asyncio.run(get_audio_bytes_mixed(
-                            st.session_state.main_text,
-                            st.session_state.cfg["engine"],
-                            st.session_state.cfg["voice_role"],
-                            st.session_state.cfg["speed"],
-                            st.session_state.cfg
-                        ))
-                        if ab: 
-                            st.session_state.audio_data = ab
-                            st.session_state.audio_timestamp = time.time() # 强制刷新
-                            st.rerun()
-                        else: st.error(err)
+                    try:
+                        with st.spinner("生成语音..."):
+                            ab, err = asyncio.run(get_audio_bytes_mixed(
+                                st.session_state.main_text,
+                                st.session_state.cfg["engine"],
+                                st.session_state.cfg["voice_role"],
+                                st.session_state.cfg["speed"],
+                                st.session_state.cfg
+                            ))
+                            if ab:
+                                st.session_state.audio_data = ab
+                                st.session_state.audio_timestamp = time.time() # 强制刷新
+                                st.rerun()
+                            else:
+                                st.error(err)
+                    except Exception as e:
+                        st.error("TTS Generation Failed")
+                        with st.expander("View Error Details"):
+                            st.code(traceback.format_exc())
             
             with col_ops[1]:
                 if st.button("🌐 翻译", use_container_width=True):
@@ -505,18 +548,16 @@ elif page == "单词本":
 elif page == "设置":
     st.subheader("⚙️ 模型与接口配置")
     st.text_input("API Key", value=st.session_state.cfg["api_key"], type="password", key="key_input", on_change=lambda: st.session_state.cfg.update({"api_key": st.session_state.key_input}))
+    st.text_input("SiliconFlow API Key", value=st.session_state.cfg.get("silicon_key", ""), type="password", key="silicon_key_input", on_change=lambda: st.session_state.cfg.update({"silicon_key": st.session_state.silicon_key_input}))
     st.text_input("Base URL", value=st.session_state.cfg["generic_base_url"], key="url_input", on_change=lambda: st.session_state.cfg.update({"generic_base_url": st.session_state.url_input}))
 
     st.divider()
 
-    # LLM Model Selection
-    chat_models = ["deepseek-ai/DeepSeek-V3"]
-    selected_chat_model = st.selectbox(
+    # LLM Model Input
+    st.session_state.cfg["chat_model"] = st.text_input(
         "LLM (Chat) Model",
-        chat_models,
-        index=chat_models.index(st.session_state.cfg.get("chat_model", chat_models[0]))
+        value=st.session_state.cfg.get("chat_model", "deepseek-ai/DeepSeek-V3")
     )
-    st.session_state.cfg["chat_model"] = selected_chat_model
 
     # OCR Model Selection
     ocr_models = ["Qwen/Qwen2-VL-72B-Instruct"]
