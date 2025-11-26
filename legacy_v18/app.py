@@ -266,7 +266,7 @@ async def get_audio_bytes_mixed(text, engine_type, voice_id, speed_int, cfg):
 
             response = client.audio.speech.create(
                 model="FunAudioLLM/CosyVoice2-0.5B",
-                voice="cosyvoice2_speaker_0", # Default speaker
+                voice=st.session_state.cfg.get("silicon_voice_id", "alex"),
                 input=text
             )
             return response.content, None
@@ -394,6 +394,12 @@ with st.sidebar:
         engine_options,
         index=default_index
     )
+
+    if st.session_state.cfg["engine"] == "SiliconFlow (CosyVoice2)":
+        st.session_state.cfg["silicon_voice_id"] = st.text_input(
+            "Voice ID / Speaker Name",
+            value=st.session_state.cfg.get("silicon_voice_id", "alex")
+        )
 
 # ================= 6. 主页面逻辑 =================
 
@@ -561,9 +567,14 @@ elif page == "设置":
 
     # OCR Model Selection
     ocr_models = ["Qwen/Qwen2-VL-72B-Instruct"]
-    selected_ocr_model = st.selectbox(
+    current_ocr_model = st.session_state.cfg.get("ocr_model", ocr_models[0])
+    try:
+        ocr_default_index = ocr_models.index(current_ocr_model)
+    except ValueError:
+        ocr_default_index = 0
+
+    st.session_state.cfg["ocr_model"] = st.selectbox(
         "OCR (Vision) Model",
         ocr_models,
-        index=ocr_models.index(st.session_state.cfg.get("ocr_model", ocr_models[0]))
+        index=ocr_default_index
     )
-    st.session_state.cfg["ocr_model"] = selected_ocr_model
